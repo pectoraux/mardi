@@ -28,9 +28,18 @@ export interface TenantContext {
 
 const storage = new AsyncLocalStorage<TenantContext>()
 
-/** Run a callback within a TenantContext. */
+/** Run a callback within a TenantContext. This also starts a Prisma transaction
+ *  with SET LOCAL app.tenant_id, enabling PostgreSQL RLS enforcement. */
 export function withTenantContext<T>(ctx: TenantContext, fn: () => Promise<T>): Promise<T> {
-  return storage.run(ctx, fn)
+  return storage.run(ctx, async () => {
+    // Dynamic imports to avoid circular dependencies
+    const { dbApp } = await import('./db')
+    const { withTxClient } = await import('./tenant-guard')
+    return await dbApp.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL app.tenant_id = '${ctx.tenantId}'`)
+      return await withTxClient(tx, fn)
+    }, { timeout: 30000, maxWait: 10000 })
+  })
 }
 
 /** Get the active TenantContext, throws if none (fail-closed). */

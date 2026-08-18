@@ -1,95 +1,75 @@
-# MARDI — Level-3 Completion Matrix
+# MARDI — Level-3 Completion Matrix (Corrected)
 
-**Baseline**: commit `236fe68`  
+**Baseline**: commit `pending`  
 **Date**: 2026-08-18  
 **Standard**: A capability is Level-3 only when it produces or observes a real external-world effect.
 
-## Completion Gates (Section 26)
+## Reviewer Corrections Applied
 
-| Gate | Status | Evidence |
-|------|--------|----------|
-| EXECUTION READY | Level 2 | Pipeline produces real audit+event; external API call simulated |
-| AI VISIBILITY READY | **Level 3** | Real web search + page reading via z-ai SDK — verified live |
-| CAUSAL READY | Level 3 | Validation suite runs; gate blocks unvalidated estimates |
-| PAYMENT READY | Level 2 | Stripe adapter code-complete; BLOCKED (no credentials) |
-| CONNECTOR READY | Level 2 | Google Ads + Shopify live; 13 stubs clearly marked NOT live |
-| EVENT READY | Level 2 | Durable Postgres outbox; no Kafka broker configured |
-| WORKFLOW READY | Level 2 | DB-backed durable; no Temporal configured |
-| ENTERPRISE READY | Level 1 | Isolation modes defined; no dedicated-infra routing |
-| DR READY | Level 1 | No restore drill performed |
-| AI READY | Level 3 | 8/8 regression tests pass against real agent |
+1. **Web visibility ≠ AI visibility** — the web search provider is "External Web Intelligence" (Level 3), not "AI Visibility" (which requires querying an actual AI answer system).
+2. **Causal validation ≠ external-world Level-3** — it is internal statistical validation (Level 2 production safety gate).
+3. **Capital provenance ≠ external-world Level-3** — it is economic governance (Level 2 production control).
+4. **PostgreSQL RLS** — now ACTIVE with FORCE + NOBYPASSRLS role (previously a security gap).
+
+## Defense-in-Depth Tenant Isolation — NOW COMPLETE
+
+| Layer | Status | Evidence |
+|-------|--------|----------|
+| 1. Application TenantContext (AsyncLocalStorage) | ACTIVE | 15 isolation tests pass |
+| 2. Repository guard (re-asserts tenantId) | ACTIVE | Proxy intercepts all queries |
+| 3. PostgreSQL RLS (FORCE + NOBYPASSRLS) | **ACTIVE** | 14 RLS tests pass; mardi_app role enforces at DB level |
+
+The `neondb_owner` role has `BYPASSRLS=true` (superuser). A dedicated `mardi_app` role with `NOBYPASSRLS` was created. The application uses `mardi_app` for all tenant-scoped queries via `dbApp`. `FORCE ROW LEVEL SECURITY` is enabled on all tenant-owned tables. Even if the application guard is bypassed, the database rejects cross-tenant queries.
 
 ## Subsystem Matrix
 
-| Subsystem | L1 | L2 | L3 | Test | External Dependency | Production Status | Known Limitation |
-|-----------|----|----|----|------|---------------------|-------------------|------------------|
-| **Multi-tenancy** | ✓ | ✓ | ✓ | 15 isolation tests pass | PostgreSQL (Neon) | Production | — |
-| **Tenant isolation** | ✓ | ✓ | ✓ | 15 tests: read/write/delete/reassign/no-context | PostgreSQL RLS (available, not enabled) | Production | RLS not yet enabled at DB level |
-| **Evidence graph** | ✓ | ✓ | ✓ | Evidence chain retrieval works | PostgreSQL | Production | Relational adapter (not Neo4j) |
-| **Decision ledger** | ✓ | ✓ | ✓ | Immutable decisions with evidence links | PostgreSQL | Production | — |
-| **Capital provenance** | ✓ | ✓ | ✓ | Synthetic cannot authorize spend; only PAYMENT_VERIFIED counts | PostgreSQL | Production | No real payment provider connected |
-| **Zero-capital growth** | ✓ | ✓ | ✓ | Diagnostic tool → prospect → outreach → revenue loop | z-ai LLM | Production | Outreach sending is manual |
-| **AI evaluation** | ✓ | ✓ | ✓ | 8/8 tests pass against real Strategy Agent | z-ai LLM | Production | No adversarial tests yet |
-| **Causal validation** | ✓ | ✓ | ✓ | 6 tests: parallel trends, placebo, spillover, backtest, uncertainty, evidence type | None (pure stats) | Production | Placebo test needs more data |
-| **Causal safety gate** | ✓ | ✓ | ✓ | Deterministic gate blocks CORRELATED estimates from live budget | None | Production | — |
-| **Execution pipeline** | ✓ | ✓ | — | Audit log + event produced; external call simulated | None (no provider credentials) | Level 2 | External API call is simulated |
-| **AI visibility** | ✓ | ✓ | ✓ | Real web search + page reading; verified with real brands | z-ai SDK web_search + page_reader | **Level 3** | Search results may not include all brands |
-| **Optimization** | ✓ | ✓ | — | Produces allocation recommendations with uncertainty | None | Level 2 | Not connected to live execution |
-| **Agent memory** | ✓ | ✓ | — | 5 memory types, tenant-scoped | In-memory store | Level 2 | Not persisted to DB |
-| **Model registry** | ✓ | ✓ | — | 3 models registered | In-memory store | Level 2 | Not persisted to DB |
-| **LLM provider** | ✓ | ✓ | ✓ | ZAI provider active; 4 stubs + 1 fallback | z-ai SDK | Production | OpenAI/Anthropic/Gemini not implemented |
-| **Connector framework** | ✓ | ✓ | partial | Google Ads + Shopify live; 13 stubs | z-ai SDK | Level 2 (2 of 15 live) | 13 connectors are stubs |
-| **Payment provider** | ✓ | ✓ | — | Stripe adapter code-complete; webhook verification works | Stripe API (needs STRIPE_SECRET_KEY) | Level 2 (BLOCKED) | No credentials configured |
-| **Email provider** | ✓ | ✓ | — | Logging adapter (SIMULATION mode) | None | Level 2 | No real email API configured |
-| **Event bus** | ✓ | ✓ | — | Durable Postgres + in-process dispatch | PostgreSQL | Level 2 | No Kafka/Redpanda configured |
-| **Workflow engine** | ✓ | ✓ | — | DB-backed durable; pause/resume/cancel | PostgreSQL | Level 2 | No Temporal configured |
-| **Vector store** | ✓ | ✓ | — | In-memory cosine similarity | None | Level 2 | No pgvector/dedicated vector DB |
-| **Graph store** | ✓ | ✓ | — | Relational Edge table with BFS traversal | PostgreSQL | Level 2 | No Neo4j |
-| **Object store** | ✓ | — | — | Interface defined; adapter not implemented | None | Level 1 | No S3/R2 adapter |
-| **Search** | ✓ | — | — | Interface defined; adapter not implemented | None | Level 1 | No FTS adapter |
-| **Observability** | ✓ | ✓ | — | Console metrics/spans/logs | None | Level 2 | No OTLP export |
-| **Billing** | ✓ | ✓ | — | 4 plans, usage tracking, entitlements | In-memory store | Level 2 | Not persisted; no Stripe billing |
-| **Enterprise tenancy** | ✓ | — | — | POOLED/HYBRID/SILO defined; no routing | None | Level 1 | No dedicated-infra routing |
-| **Disaster recovery** | ✓ | — | — | Not implemented | None | Level 1 | No backup/restore drill |
+| Subsystem | Level | Test | External Dependency | Known Limitation |
+|-----------|-------|------|---------------------|------------------|
+| **Multi-tenancy** | L3 | 15 isolation + 14 RLS tests | PostgreSQL (Neon) | — |
+| **Tenant isolation (RLS)** | **L3** | 14 RLS tests: policy exists, filters correctly, blocks cross-tenant, FORCE enabled | PostgreSQL RLS + mardi_app role | — |
+| **External Web Intelligence** | **L3** | Real web search + page reading; verified with real brands | z-ai SDK web_search + page_reader | Searches web, not AI answer systems |
+| **AI Evaluation** | **L3** | 8/8 tests pass against real Strategy Agent | z-ai LLM | No adversarial tests yet |
+| **AI Visibility (actual AI system)** | L1 | Interface defined; not yet querying AI answer systems | None | Needs real AI answer API |
+| **Causal validation** | L2 | 6 tests (5/6 pass); safety gate blocks unvalidated estimates | None (internal stats) | Placebo test needs more data |
+| **Capital provenance** | L2 | Synthetic cannot authorize spend; only PAYMENT_VERIFIED counts | None (internal control) | No real payment provider connected |
+| **Execution pipeline** | L2 | Audit log + event produced; external call simulated | None | External API call simulated |
+| **Payment provider (Stripe)** | L2 | Adapter code-complete; webhook verification works | Stripe API (needs STRIPE_SECRET_KEY) | BLOCKED — no credentials |
+| **Connector framework** | L2 | Google Ads + Shopify live; 13 stubs | z-ai SDK | 13 connectors are stubs |
+| **Event bus** | L2 | Durable Postgres + in-process dispatch | PostgreSQL | No Kafka configured |
+| **Workflow engine** | L2 | DB-backed durable; pause/resume/cancel | PostgreSQL | No Temporal configured |
+| **Optimization** | L2 | Produces allocation recommendations | None | Not connected to live execution |
+| **Agent memory** | L2 | 5 types, tenant-scoped | In-memory store | Not persisted to DB |
+| **Model registry** | L2 | 3 models registered | In-memory store | Not persisted to DB |
+| **LLM provider** | L3 | ZAI provider active | z-ai SDK | OpenAI/Anthropic not implemented |
+| **Email provider** | L2 | Logging adapter (SIMULATION) | None | No real email API |
+| **Vector store** | L2 | In-memory cosine similarity | None | No pgvector |
+| **Graph store** | L2 | Relational Edge table + BFS | PostgreSQL | No Neo4j |
+| **Object store** | L1 | Interface defined | None | No S3/R2 adapter |
+| **Search** | L1 | Interface defined | None | No FTS adapter |
+| **Observability** | L2 | Console metrics/spans/logs | None | No OTLP export |
+| **Billing** | L2 | 4 plans, usage tracking | In-memory | No Stripe billing |
+| **Enterprise tenancy** | L1 | Modes defined | None | No routing |
+| **Disaster recovery** | L1 | Not implemented | None | No restore drill |
 
 ## Level-3 Evidence
 
-### AI Visibility (Level-3)
-- **Test executed**: POST /api/ai-visibility with brand="Blue Bottle Coffee", query="best specialty coffee roasters 2025"
-- **External system**: z-ai SDK web_search + page_reader (real HTTP requests)
-- **Request**: web_search for "best specialty coffee roasters 2025", page_reader on 3 URLs
-- **Response**: 3 real search results (coffeebros.com, reddit.com, roastmagazine.com), 3 pages read, competitor "Onyx" detected with 2 mentions
-- **Audit identifier**: event emitted with eventType='ai_visibility_observed'
-- **Evidence identifier**: responseHash='1af03684027b4adf', provenance='web_search:z-ai-sdk (REAL external HTTP requests)'
-- **Source**: real_external (NOT simulated)
+### Tenant Isolation (RLS) — Level 3
+- **Test executed**: `scripts/test-rls.ts` (14 tests)
+- **External system**: PostgreSQL (Neon) with FORCE ROW LEVEL SECURITY
+- **Role**: `mardi_app` (NOBYPASSRLS) — cannot bypass RLS even as table owner
+- **Results**:
+  - Without session variable: 0 rows (fail-closed)
+  - With acme session: 2 campaigns (only acme's)
+  - Cross-tenant: 0 nova campaigns (blocked)
+  - Customer filtering: 80 (only acme's, not 160)
+  - FORCE=true on all tables
 
-### AI Evaluation (Level-3)
+### External Web Intelligence — Level 3
+- **Test executed**: POST /api/ai-visibility with real brand query
+- **External system**: z-ai SDK web_search + page_reader (real HTTP requests)
+- **Results**: 3 real search results, 3 pages read, competitor detected from real content
+
+### AI Evaluation — Level 3
 - **Test executed**: POST /api/ai-eval (8 test cases)
 - **External system**: z-ai LLM (real chat completions)
 - **Result**: 8/8 passed
-- **Tests**: output_schema, evidence_grounding, unsupported_causality, tenant_leakage, tool_misuse, reproducibility, hallucination, instruction_following
-
-### Causal Validation (Level-3)
-- **Test executed**: POST /api/causal-validation (6 tests)
-- **Result**: 5/6 passed, canInfluenceLiveBudget=False
-- **Gate**: deterministic server-side causalGateForEstimate() blocks CORRELATED estimates and low-confidence estimates from live budget
-
-### Capital Provenance (Level-3)
-- **Test executed**: 15 tenant isolation tests + capital provenance invariant
-- **Result**: Synthetic $5000 tracked separately; verifiedAvailable=$0; only PAYMENT_VERIFIED counts
-
-## What Would Make Each Level-2 → Level-3
-
-| Subsystem | What's needed for Level-3 |
-|-----------|--------------------------|
-| Execution pipeline | Real provider credentials (Google Ads API, etc.) |
-| Payment provider | STRIPE_SECRET_KEY configured |
-| Event bus | Kafka/Redpanda broker configured |
-| Workflow engine | Temporal server configured |
-| Vector store | pgvector or dedicated vector DB |
-| Agent memory | Persist to Postgres table |
-| Model registry | Persist to Postgres table |
-| Enterprise tenancy | Implement TenantInfrastructureProfile routing |
-| Disaster recovery | Perform actual restore drill |
-| Object store | Implement S3/R2 adapter |
-| Search | Implement Postgres FTS adapter |

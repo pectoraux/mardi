@@ -13,8 +13,25 @@
 //  * updates/deletes always require `where: { id, tenantId }`
 //  * a missing TenantContext throws (fail-closed)
 
-import { db } from './db'
+import { db, dbApp } from './db'
 import { getTenantContext, requireTenantId } from './tenant-context'
+import { AsyncLocalStorage } from 'node:async_hooks'
+
+// Transaction client storage — when active, the Proxy delegates to this
+// instead of the global dbApp. The middleware sets this via SET LOCAL app.tenant_id
+// inside a Prisma $transaction, enabling PostgreSQL RLS enforcement.
+type PrismaTx = typeof dbApp
+const txStorage = new AsyncLocalStorage<PrismaTx>()
+
+/** Get the active Prisma client (transaction-scoped if available, app client otherwise). */
+function getClient(): PrismaTx {
+  return txStorage.getStore() ?? dbApp
+}
+
+/** Run a callback with a transaction-scoped Prisma client (for RLS). */
+export function withTxClient<T>(tx: PrismaTx, fn: () => Promise<T>): Promise<T> {
+  return txStorage.run(tx, fn)
+}
 
 // Prisma's WhereInput types are large; we use a minimal structural type to
 // avoid coupling this guard to the generated client surface.
@@ -47,10 +64,9 @@ export class TenantIsolationViolation extends Error {
 // Generic typed accessor — wraps a Prisma delegate with tenant enforcement.
 // ---------------------------------------------------------------------------
 export function tenantModel<Delegate>(name: string): Delegate {
-  // @ts-expect-error — dynamic delegate access on the prisma client
-  const delegate: Delegate = db[name]
-  if (!delegate) throw new Error(`tenantModel: unknown model "${name}"`)
-  return new Proxy(delegate as object, {
+  // The delegate is resolved dynamically from the current client (transaction or global)
+  // so that RLS-enforced transactions work correctly.
+  return new Proxy({} as Delegate, {
     get(_target, prop: string) {
       const ctx = peekSafe()
       if (!ctx) {
@@ -58,6 +74,10 @@ export function tenantModel<Delegate>(name: string): Delegate {
           `tenantModel(${name}).${prop}: no active TenantContext`
         )
       }
+      const client = getClient()
+      // @ts-expect-error dynamic delegate access
+      const delegate = client[name]
+      if (!delegate) throw new Error(`tenantModel: unknown model "${name}"`)
       // @ts-expect-error dynamic
       const orig = delegate[prop]
       if (typeof orig !== 'function') return orig

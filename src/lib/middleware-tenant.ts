@@ -83,6 +83,8 @@ export function withTenant<TArgs = unknown>(
 
     const ctx = buildContext(tenant, { userId, roles })
     try {
+      // withTenantContext now handles both the AsyncLocalStorage context AND
+      // the Prisma transaction with SET LOCAL app.tenant_id (RLS enforcement).
       const out = await withTenantContext(ctx, () => handler(req, { ...args, ctx }))
       return out
     } catch (err) {
