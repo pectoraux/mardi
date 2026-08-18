@@ -14,6 +14,7 @@ import type { TenantContext } from '../../tenant-context'
 import type { LLMProvider } from '../../application/ports'
 import { t } from '../../tenant-guard'
 import { WebSearchAIVisibilityProvider, type RealAIObservation } from '../../infrastructure/ai-visibility/WebSearchProvider'
+import { ZAIModelVisibilityProvider, type RealAISystemObservation } from '../../infrastructure/ai-visibility/ZAIModelVisibilityProvider'
 import { emit } from '../../event-bus'
 import { randomUUID } from 'node:crypto'
 
@@ -22,8 +23,12 @@ export interface AIVisibilityObservation {
   tenantId: string
   brand: string
   query: string
-  sourceType: 'real_external' | 'simulated' // NEVER blurred
-  provider: string // 'web_search' for real, 'llm:zai' for simulated
+  // Three distinct source types — NEVER blurred:
+  //   'real_ai_system' — queried an actual AI model and inspected its real response (TRUE AI visibility)
+  //   'real_external'  — searched the real web + read real pages (External Web Intelligence)
+  //   'simulated'      — LLM simulation (fallback only, confidence=0.3)
+  sourceType: 'real_ai_system' | 'real_external' | 'simulated'
+  provider: string
   brandMentioned: boolean
   mentionPositions: Array<{ url: string; position: number; context: string }>
   competitorMentions: Array<{ name: string; url: string; count: number }>
@@ -47,12 +52,19 @@ export interface AIVisibilityReport {
   avgPosition: number | null
   competitorShare: Array<{ competitor: string; mentionCount: number; share: number }>
   topAttributes: string[]
-  sourceBreakdown: { real_external: number; simulated: number }
+  sourceBreakdown: { real_ai_system: number; real_external: number; simulated: number }
   recommendations: string[]
 }
 
 export interface AIVisibilityService {
-  /** Observe AI visibility using REAL web search (Level-3). */
+  /** Observe AI visibility by querying an ACTUAL AI system (TRUE AI visibility, Level-3). */
+  observeFromAISystem(ctx: TenantContext, input: {
+    brand: string
+    query: string
+    competitors?: string[]
+  }): Promise<AIVisibilityObservation>
+
+  /** Observe AI visibility using REAL web search (External Web Intelligence, Level-3). */
   observeReal(ctx: TenantContext, input: {
     brand: string
     query: string
@@ -77,6 +89,64 @@ export interface AIVisibilityService {
 
 export function createAIVisibilityService(llm: LLMProvider): AIVisibilityService {
   return {
+    async observeFromAISystem(ctx, input) {
+      // Query the ACTUAL z-ai model with the user's question
+      // and inspect its REAL response for brand mentions.
+      // This is TRUE AI visibility — not web search, not simulation.
+      const realObs = await ZAIModelVisibilityProvider.observe({
+        brand: input.brand,
+        query: input.query,
+        competitors: input.competitors ?? [],
+      })
+
+      const observation: AIVisibilityObservation = {
+        id: randomUUID(),
+        tenantId: ctx.tenantId,
+        brand: input.brand,
+        query: input.query,
+        sourceType: 'real_ai_system',
+        provider: realObs.provider,
+        brandMentioned: realObs.brandMentioned,
+        mentionPositions: realObs.mentionContexts.map((context, i) => ({
+          url: `ai_response://zai-glm-4.6/mention_${i}`,
+          position: i === 0 ? (realObs.firstMentionPosition ?? 0) : 0,
+          context,
+        })),
+        competitorMentions: realObs.competitorMentions.map((c) => ({
+          name: c.name,
+          url: '',
+          count: c.count,
+        })),
+        attributes: realObs.attributes,
+        sourceUrls: [`ai_response://zai-glm-4.6/${realObs.responseHash}`],
+        responseHash: realObs.responseHash,
+        retrievedAt: realObs.retrievedAt,
+        provenance: realObs.provenance,
+        confidence: realObs.confidence,
+        // Store the raw AI response for audit
+        searchResults: [{
+          title: `AI response from ${realObs.aiSystem}`,
+          url: `ai_response://zai-glm-4.6/${realObs.responseHash}`,
+          snippet: realObs.rawResponse.slice(0, 200),
+          position: 1,
+        }],
+        pagesReadCount: 1,
+      }
+
+      await emit('ai_visibility_observed', {
+        source: 'ai_visibility_service',
+        entityType: 'Brand',
+        entityId: input.brand,
+        properties: {
+          ...observation,
+          sourceType: 'real_ai_system',
+          rawResponse: realObs.rawResponse.slice(0, 2000),
+        },
+      })
+
+      return observation
+    },
+
     async observeReal(ctx, input) {
       // Make REAL external HTTP requests via web search + page reading
       const realObs = await WebSearchAIVisibilityProvider.observe({
