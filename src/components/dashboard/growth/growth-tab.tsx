@@ -1,18 +1,26 @@
 'use client'
 
+import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, ArrowRight, CheckCircle2, Clock, DollarSign, Mail,
-  Target, TrendingUp, Users, Zap,
+  Activity, ArrowRight, Check, CheckCircle2, Clock, DollarSign, Mail,
+  Target, TrendingUp, Users, X, Zap,
 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Progress } from '@/components/ui/progress'
 import { toast } from 'sonner'
 import { apiFetch, fmtMoney, fmtPct, fmtDateTime } from '../types'
+import { ProspectWorkbench } from './prospect-workbench'
 
 interface GrowthDashboard {
+  headline: {
+    verifiedCustomers: number
+    paidSpend: number
+    verifiedRevenue: number
+    prospects: number
+    outreachSent: number
+  }
   capital: {
     verifiedAvailable: number
     syntheticAvailable: number
@@ -22,6 +30,7 @@ interface GrowthDashboard {
     synthetic: number
     currency: string
     isZeroVerifiedCapital: boolean
+    hasEarnedRealRevenue: boolean
   }
   funnel: {
     prospectsIdentified: number
@@ -35,6 +44,12 @@ interface GrowthDashboard {
     totalCustomers: number
     totalRevenue: number
   }
+  diagnosticFunnel: {
+    total: number
+    promotedToProspect: number
+    rejected: number
+    pendingReview: number
+  }
   experiments: Array<{
     id: string; name: string; acquisitionMechanism: string; status: string
     cost: number; effortHours: number; exposure: number; leads: number
@@ -43,25 +58,18 @@ interface GrowthDashboard {
   }>
   mechanisms: Array<{ mechanism: string; exposure: number; leads: number; customers: number; revenue: number }>
   pendingApprovals: number
+  drafts: number
   cashSpend: number
 }
 
 export function GrowthTab({ tenant }: { tenant: string }) {
   const qc = useQueryClient()
+  const [view, setView] = useState<'workbench' | 'diagnostic_runs'>('workbench')
+
   const dashQ = useQuery({
     queryKey: ['growth-dashboard', tenant],
     queryFn: () => apiFetch<GrowthDashboard>('/api/growth/dashboard', tenant),
     refetchInterval: 15_000,
-  })
-
-  const prospectsQ = useQuery({
-    queryKey: ['growth-prospects', tenant],
-    queryFn: () => apiFetch<{ prospects: Array<Record<string, unknown>> }>('/api/growth/prospects', tenant),
-  })
-
-  const outreachesQ = useQuery({
-    queryKey: ['growth-outreach', tenant],
-    queryFn: () => apiFetch<{ outreaches: Array<Record<string, unknown>> }>('/api/growth/outreach', tenant),
   })
 
   const d = dashQ.data
@@ -69,60 +77,88 @@ export function GrowthTab({ tenant }: { tenant: string }) {
 
   return (
     <div className="space-y-5">
-      {/* Capital provenance banner */}
-      <Card className={d.capital.isZeroVerifiedCapital ? 'border-amber-300 bg-amber-50/50 dark:bg-amber-950/10' : ''}>
+      {/* HEADLINE METRIC — the reviewer's #1 request */}
+      <Card className={d.headline.verifiedCustomers > 0 ? 'border-emerald-400 bg-emerald-50/50 dark:bg-emerald-950/20' : 'border-amber-300 bg-amber-50/30 dark:bg-amber-950/10'}>
+        <CardContent className="py-4">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+            <HeadlineStat
+              label="VERIFIED CUSTOMERS"
+              value={String(d.headline.verifiedCustomers)}
+              sub="$0 paid spend"
+              highlight={d.headline.verifiedCustomers > 0 ? 'success' : 'pending'}
+              icon={CheckCircle2}
+            />
+            <HeadlineStat label="PAID SPEND" value={fmtMoney(d.headline.paidSpend)} sub="this milestone" icon={DollarSign} />
+            <HeadlineStat
+              label="VERIFIED REVENUE"
+              value={fmtMoney(d.headline.verifiedRevenue)}
+              sub={d.capital.hasEarnedRealRevenue ? 'earned' : 'none yet'}
+              highlight={d.capital.hasEarnedRealRevenue ? 'success' : 'pending'}
+              icon={TrendingUp}
+            />
+            <HeadlineStat label="PROSPECTS" value={String(d.headline.prospects)} sub="qualified" icon={Target} />
+            <HeadlineStat label="OUTREACH SENT" value={String(d.headline.outreachSent)} sub={`${fmtPct(d.funnel.responseRate)} replied`} icon={Mail} />
+          </div>
+          {d.headline.verifiedCustomers === 0 && (
+            <div className="mt-3 text-[11px] text-amber-900 dark:text-amber-100 flex items-center gap-2">
+              <Clock className="size-3.5" />
+              <span><strong>0 verified customers acquired with $0 paid spend.</strong> The milestone is open. Promote diagnostic runs → generate outreach → approve → send → convert.</span>
+            </div>
+          )}
+          {d.headline.verifiedCustomers > 0 && (
+            <div className="mt-3 text-[11px] text-emerald-900 dark:text-emerald-100 flex items-center gap-2 font-medium">
+              <CheckCircle2 className="size-3.5" />
+              <span>Milestone achieved: {d.headline.verifiedCustomers} verified customer(s) acquired with $0 paid spend. {fmtMoney(d.headline.verifiedRevenue)} earned revenue now fuels the Growth Decision Engine.</span>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Capital provenance */}
+      <Card className={d.capital.isZeroVerifiedCapital ? 'border-amber-300' : 'border-emerald-300'}>
         <CardHeader className="pb-3">
           <CardTitle className="text-base flex items-center gap-2">
             <DollarSign className="size-4 text-amber-600" /> Capital Provenance
           </CardTitle>
-          <CardDescription>
+          <CardDescription className="text-xs">
             Synthetic capital is tracked but CANNOT authorize real-world spending. Only verified capital counts.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <CapitalStat label="Verified Available" value={fmtMoney(d.capital.verifiedAvailable)} highlight={d.capital.isZeroVerifiedCapital ? 'zero' : 'ok'} />
-            <CapitalStat label="Earned Revenue" value={fmtMoney(d.capital.earnedRevenue)} />
+            <CapitalStat label="Earned Revenue" value={fmtMoney(d.capital.earnedRevenue)} highlight={d.capital.hasEarnedRealRevenue ? 'ok' : undefined} />
             <CapitalStat label="Owner Funded" value={fmtMoney(d.capital.ownerFunded)} />
             <CapitalStat label="Synthetic (test)" value={fmtMoney(d.capital.syntheticAvailable)} muted />
           </div>
-          {d.capital.isZeroVerifiedCapital && (
-            <div className="mt-3 rounded-md bg-amber-100 dark:bg-amber-950/30 p-2 text-[11px] text-amber-900 dark:text-amber-100 flex items-center gap-2">
-              <Zap className="size-3.5" />
-              <span><strong>$0 verified capital.</strong> The system is running on zero-cost acquisition mechanisms only. Paid actions are blocked.</span>
-            </div>
-          )}
         </CardContent>
       </Card>
 
-      {/* Funnel */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <TrendingUp className="size-4 text-emerald-600" /> Acquisition Funnel
-          </CardTitle>
-          <CardDescription>Zero-capital acquisition loop: prospect → outreach → response → customer</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
-            <FunnelStat icon={Target} label="Prospects" value={d.funnel.prospectsIdentified} />
-            <FunnelStat icon={Mail} label="Outreach sent" value={d.funnel.outreachSent} />
-            <FunnelStat icon={CheckCircle2} label="Replied" value={d.funnel.outreachReplied} />
-            <FunnelStat icon={Users} label="Qualified" value={d.funnel.totalQualified} />
-            <FunnelStat icon={Activity} label="Customers" value={d.funnel.totalCustomers} />
-            <FunnelStat icon={DollarSign} label="Revenue" value={fmtMoney(d.funnel.totalRevenue)} />
-          </div>
-          <div className="mt-3 flex items-center gap-4 text-xs">
-            <span className="text-muted-foreground">Response rate: <span className="font-medium text-foreground">{fmtPct(d.funnel.responseRate)}</span></span>
-            <span className="text-muted-foreground">Cash spend: <span className="font-medium text-emerald-700">$0</span></span>
-            {d.pendingApprovals > 0 && (
-              <Badge variant="outline" className="text-[10px] h-5 bg-amber-50 text-amber-700 border-amber-300">
-                <Clock className="size-2.5 mr-1" />{d.pendingApprovals} pending approval
-              </Badge>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+      {/* View toggle */}
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm" variant={view === 'workbench' ? 'default' : 'outline'}
+          onClick={() => setView('workbench')}
+          className="gap-1.5"
+        >
+          <Target className="size-3.5" /> Prospect Workbench
+        </Button>
+        <Button
+          size="sm" variant={view === 'diagnostic_runs' ? 'default' : 'outline'}
+          onClick={() => setView('diagnostic_runs')}
+          className="gap-1.5"
+        >
+          <Activity className="size-3.5" /> Diagnostic Runs
+          {d.diagnosticFunnel.pendingReview > 0 && (
+            <Badge variant="outline" className="text-[9px] h-4 ml-1 bg-amber-50 text-amber-700 border-amber-300">
+              {d.diagnosticFunnel.pendingReview}
+            </Badge>
+          )}
+        </Button>
+      </div>
+
+      {view === 'workbench' && <ProspectWorkbench tenant={tenant} />}
+      {view === 'diagnostic_runs' && <DiagnosticRunsReview tenant={tenant} />}
 
       {/* Mechanism performance */}
       {d.mechanisms.length > 0 && (
@@ -131,7 +167,6 @@ export function GrowthTab({ tenant }: { tenant: string }) {
             <CardTitle className="text-base flex items-center gap-2">
               <Zap className="size-4 text-fuchsia-600" /> Acquisition Mechanism Performance
             </CardTitle>
-            <CardDescription>Which zero-cost mechanisms are producing results</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
@@ -148,93 +183,130 @@ export function GrowthTab({ tenant }: { tenant: string }) {
           </CardContent>
         </Card>
       )}
+    </div>
+  )
+}
 
-      {/* Experiments */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Activity className="size-4 text-teal-600" /> Growth Experiments
-          </CardTitle>
-          <CardDescription>Testing which acquisition mechanisms produce qualified customers</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {d.experiments.length === 0 && <div className="text-xs text-muted-foreground italic py-3 text-center">No growth experiments yet.</div>}
-          <div className="space-y-3">
-            {d.experiments.map((e) => (
-              <div key={e.id} className="rounded-lg border p-3">
+function DiagnosticRunsReview({ tenant }: { tenant: string }) {
+  const qc = useQueryClient()
+  const runsQ = useQuery({
+    queryKey: ['diagnostic-runs', tenant],
+    queryFn: () => apiFetch<{ runs: Array<Record<string, unknown>> }>('/api/growth/diagnostic-runs', tenant),
+    refetchInterval: 10_000,
+  })
+
+  async function promote(runId: string) {
+    const t = toast.loading('Promoting to prospect…')
+    try {
+      await apiFetch('/api/growth/diagnostic-runs', tenant, {
+        method: 'POST', body: { action: 'promote_to_prospect', diagnosticRunId: runId },
+      })
+      toast.success('Promoted to prospect', { id: t })
+      qc.invalidateQueries({ queryKey: ['diagnostic-runs', tenant] })
+      qc.invalidateQueries({ queryKey: ['growth-prospects', tenant] })
+      qc.invalidateQueries({ queryKey: ['growth-dashboard', tenant] })
+    } catch (e) {
+      toast.error(String(e).slice(0, 120), { id: t })
+    }
+  }
+
+  async function reject(runId: string) {
+    const t = toast.loading('Rejecting…')
+    try {
+      await apiFetch('/api/growth/diagnostic-runs', tenant, {
+        method: 'POST', body: { action: 'reject', diagnosticRunId: runId },
+      })
+      toast.success('Rejected', { id: t })
+      qc.invalidateQueries({ queryKey: ['diagnostic-runs', tenant] })
+      qc.invalidateQueries({ queryKey: ['growth-dashboard', tenant] })
+    } catch (e) {
+      toast.error(String(e).slice(0, 120), { id: t })
+    }
+  }
+
+  const runs = runsQ.data?.runs ?? []
+  const pending = runs.filter((r) => r.stage === 'diagnostic_run' || r.stage === 'identified_organization')
+  const reviewed = runs.filter((r) => r.stage !== 'diagnostic_run' && r.stage !== 'identified_organization')
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Diagnostic Runs — Review & Promote</CardTitle>
+        <CardDescription className="text-xs">
+          A visitor running the diagnostic tool is NOT automatically a prospect. Explicitly promote qualified ones.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {pending.length === 0 && <div className="text-xs text-muted-foreground italic py-3 text-center">No diagnostic runs pending review.</div>}
+        <div className="space-y-3">
+          {pending.map((r) => {
+            const diag = r.diagnosis as Record<string, unknown>
+            return (
+              <div key={r.id as string} className="border rounded-lg p-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <div className="font-medium text-sm">{e.name}</div>
-                    <div className="text-[11px] text-muted-foreground mt-0.5 capitalize">
-                      {e.acquisitionMechanism.replace(/_/g, ' ')} · {e.effortHours}h effort · ${e.cost} cash
+                    <div className="font-medium text-sm">{r.company as string}</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {r.website as string ?? '—'} · {r.industry as string ?? '—'} · {fmtDateTime(r.createdAt as string)}
                     </div>
                   </div>
-                  <Badge variant="outline" className="text-[10px] h-5 shrink-0">{e.status}</Badge>
+                  <Badge variant="outline" className="text-[9px] h-5 bg-amber-50 text-amber-700 border-amber-300">
+                    {r.stage as string}
+                  </Badge>
                 </div>
-                {e.learning && (
-                  <div className="mt-2 rounded-md bg-emerald-50 dark:bg-emerald-950/20 p-2 text-[11px] text-emerald-900 dark:text-emerald-100">
-                    <span className="font-medium">Learning:</span> {e.learning}
+                {diag && (
+                  <div className="mt-2 text-[11px] space-y-1 bg-muted/40 rounded p-2 max-h-40 overflow-y-auto">
+                    {diag.recommendedAngle && <div><span className="font-medium">Angle:</span> {String(diag.recommendedAngle)}</div>}
+                    {diag.mardiFit && <div><span className="font-medium">MARDI fit:</span> {String(diag.mardiFit).slice(0, 200)}</div>}
+                    {diag.nextStep && <div><span className="font-medium">Next step:</span> {String(diag.nextStep)}</div>}
                   </div>
                 )}
+                <div className="flex items-center gap-2 mt-2">
+                  <Button size="sm" className="h-6 text-[11px] gap-1" onClick={() => promote(r.id as string)}>
+                    <Check className="size-3" /> Promote to prospect
+                  </Button>
+                  <Button size="sm" variant="outline" className="h-6 text-[11px] gap-1" onClick={() => reject(r.id as string)}>
+                    <X className="size-3" /> Reject
+                  </Button>
+                </div>
               </div>
-            ))}
+            )
+          })}
+        </div>
+        {reviewed.length > 0 && (
+          <div className="mt-4 pt-3 border-t">
+            <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">Reviewed ({reviewed.length})</div>
+            <div className="space-y-1">
+              {reviewed.slice(0, 5).map((r) => (
+                <div key={r.id as string} className="flex items-center justify-between text-[11px] py-1">
+                  <span>{r.company as string}</span>
+                  <Badge variant="outline" className={`text-[9px] h-4 ${r.stage === 'promoted_to_prospect' ? 'bg-emerald-50 text-emerald-700' : 'bg-destructive/5 text-destructive'}`}>
+                    {r.stage as string}
+                  </Badge>
+                </div>
+              ))}
+            </div>
           </div>
-        </CardContent>
-      </Card>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
 
-      {/* Prospects + Outreach */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <Target className="size-4 text-amber-600" /> Prospects
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="max-h-80 overflow-y-auto space-y-2">
-              {prospectsQ.data?.prospects.length === 0 && <div className="text-xs text-muted-foreground italic py-3 text-center">No prospects yet.</div>}
-              {prospectsQ.data?.prospects.map((p) => (
-                <div key={p.id as string} className="border rounded-md p-2 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium">{p.company as string}</span>
-                    <Badge variant="outline" className="text-[9px] h-4">{p.status as string}</Badge>
-                  </div>
-                  <div className="text-muted-foreground mt-0.5">
-                    {p.industry as string ?? '—'} · ICP fit {fmtPct(p.icpFitScore as number)} · source: {p.source as string}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <Mail className="size-4 text-fuchsia-600" /> Outreach
-            </CardTitle>
-            <CardDescription>Human approval required before sending</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="max-h-80 overflow-y-auto space-y-2">
-              {outreachesQ.data?.outreaches.length === 0 && <div className="text-xs text-muted-foreground italic py-3 text-center">No outreach yet.</div>}
-              {outreachesQ.data?.outreaches.map((o) => (
-                <div key={o.id as string} className="border rounded-md p-2 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium">{o.prospectCompany as string ?? '—'}</span>
-                    <Badge variant="outline" className={`text-[9px] h-4 ${
-                      o.status === 'sent' ? 'bg-emerald-50 text-emerald-700' :
-                      o.status === 'replied' ? 'bg-teal-50 text-teal-700' :
-                      o.status === 'approved' ? 'bg-blue-50 text-blue-700' :
-                      'bg-muted'
-                    }`}>{o.status as string}</Badge>
-                  </div>
-                  <div className="text-muted-foreground mt-0.5 truncate">{(o.subject as string) ?? (o.body as string)?.slice(0, 60) ?? '—'}</div>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
+function HeadlineStat({ label, value, sub, highlight, icon: Icon }: { label: string; value: string; sub: string; highlight?: 'success' | 'pending'; icon: typeof DollarSign }) {
+  return (
+    <div className="flex items-center gap-3">
+      <div className={`size-10 rounded-lg grid place-items-center shrink-0 ${
+        highlight === 'success' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' :
+        highlight === 'pending' ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' :
+        'bg-muted text-muted-foreground'
+      }`}>
+        <Icon className="size-5" />
+      </div>
+      <div className="min-w-0">
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground truncate">{label}</div>
+        <div className={`text-xl font-bold ${highlight === 'success' ? 'text-emerald-700 dark:text-emerald-300' : highlight === 'pending' ? 'text-amber-700 dark:text-amber-300' : ''}`}>{value}</div>
+        <div className="text-[10px] text-muted-foreground truncate">{sub}</div>
       </div>
     </div>
   )
@@ -242,21 +314,9 @@ export function GrowthTab({ tenant }: { tenant: string }) {
 
 function CapitalStat({ label, value, highlight, muted }: { label: string; value: string; highlight?: 'zero' | 'ok'; muted?: boolean }) {
   return (
-    <div className={`rounded-lg border p-3 ${highlight === 'zero' ? 'border-amber-300 bg-amber-50 dark:bg-amber-950/20' : ''}`}>
+    <div className={`rounded-lg border p-3 ${highlight === 'zero' ? 'border-amber-300 bg-amber-50 dark:bg-amber-950/20' : highlight === 'ok' ? 'border-emerald-300 bg-emerald-50 dark:bg-emerald-950/20' : ''}`}>
       <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className={`text-lg font-semibold mt-0.5 ${muted ? 'text-muted-foreground' : highlight === 'zero' ? 'text-amber-700' : ''}`}>{value}</div>
-    </div>
-  )
-}
-
-function FunnelStat({ icon: Icon, label, value }: { icon: typeof Target; label: string; value: number | string }) {
-  return (
-    <div className="rounded-lg border p-2.5">
-      <div className="flex items-center justify-between">
-        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</span>
-        <Icon className="size-3 text-muted-foreground" />
-      </div>
-      <div className="text-lg font-semibold mt-0.5">{value}</div>
+      <div className={`text-lg font-semibold mt-0.5 ${muted ? 'text-muted-foreground' : highlight === 'zero' ? 'text-amber-700' : highlight === 'ok' ? 'text-emerald-700' : ''}`}>{value}</div>
     </div>
   )
 }

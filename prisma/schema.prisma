@@ -60,6 +60,7 @@ model Tenant {
   prospects     Prospect[]
   outreaches    Outreach[]
   contentAssets ContentAsset[]
+  diagnosticRuns DiagnosticRun[]
 }
 
 // -----------------------------------------------------------------------------
@@ -249,6 +250,48 @@ model ContentAsset {
   @@index([tenantId])
   @@index([tenantId, type])
   @@index([tenantId, status])
+}
+
+// -----------------------------------------------------------------------------
+// 0g. DIAGNOSTIC RUN — explicit intent funnel (reviewer fix)
+// -----------------------------------------------------------------------------
+// A visitor running the diagnostic tool is NOT automatically a Prospect.
+// The funnel is:
+//   DiagnosticRun (visitor ran the tool)
+//     → IdentifiedOrganization (system detected a real company)
+//       → PotentialProspect (operator flagged for review)
+//         → QualifiedProspect (= Prospect, operator approved for outreach)
+//
+// This prevents funnel inflation. Promotion requires explicit action.
+
+model DiagnosticRun {
+  id              String   @id @default(cuid())
+  tenantId        String
+  // What the visitor provided
+  company         String
+  website         String?
+  industry        String?
+  size            String?
+  notes           String?
+  // The diagnosis output
+  diagnosis       String   // JSON: observed/inferred/predicted/recommended
+  provider        String?
+  model           String?
+  fellBack        Boolean  @default(false)
+  // Funnel stage
+  stage           String   @default("diagnostic_run") // diagnostic_run | identified_organization | potential_prospect | promoted_to_prospect | rejected
+  // Link to Prospect if promoted
+  prospectId      String?
+  // Meta
+  visitorIp       String?
+  createdAt       DateTime @default(now())
+  promotedAt      DateTime?
+  promotedBy      String?
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, stage])
+  @@index([prospectId])
 }
 
 model Organization {

@@ -7,11 +7,12 @@ import { createCapitalProvenanceService } from '@/lib/domain/services/capital-pr
 export const GET = withTenant(async (_req, { ctx }) => {
   const repo = getRepository()
   const capitalService = createCapitalProvenanceService(repo)
-  const [experiments, prospects, outreaches, capital] = await Promise.all([
+  const [experiments, prospects, outreaches, capital, diagnosticRuns] = await Promise.all([
     t.growthExperiment.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
     t.prospect.findMany({ take: 500 }),
     t.outreach.findMany({ take: 500 }),
     capitalService.getTrustworthySummary(ctx),
+    t.diagnosticRun.findMany({ orderBy: { createdAt: 'desc' }, take: 100 }),
   ])
 
   // Funnel aggregation
@@ -23,9 +24,15 @@ export const GET = withTenant(async (_req, { ctx }) => {
   const totalRevenue = experiments.reduce((s, e) => s + e.revenue, 0)
 
   // Outreach stats
-  const outreachSent = outreaches.filter((o) => o.status === 'sent' || o.status === 'replied').length
-  const outreachReplied = outreaches.filter((o) => o.status === 'replied').length
+  const outreachSent = outreaches.filter((o) => o.status === 'sent' || o.status === 'replied' || o.status === 'closed').length
+  const outreachReplied = outreaches.filter((o) => o.status === 'replied' || o.status === 'closed').length
   const responseRate = outreachSent > 0 ? outreachReplied / outreachSent : 0
+
+  // Diagnostic run funnel
+  const diagnosticRunsTotal = diagnosticRuns.length
+  const promotedToProspect = diagnosticRuns.filter((r) => r.stage === 'promoted_to_prospect').length
+  const rejected = diagnosticRuns.filter((r) => r.stage === 'rejected').length
+  const pendingReview = diagnosticRuns.filter((r) => r.stage === 'diagnostic_run' || r.stage === 'identified_organization').length
 
   // Mechanism performance
   const byMechanism = new Map<string, { exposure: number; leads: number; customers: number; revenue: number }>()
@@ -39,9 +46,18 @@ export const GET = withTenant(async (_req, { ctx }) => {
     agg.revenue += e.revenue
   }
 
-  const pendingApprovals = outreaches.filter((o) => o.status === 'pending_approval' || o.status === 'draft').length
+  const pendingApprovals = outreaches.filter((o) => o.status === 'draft').length
+  const drafts = outreaches.filter((o) => o.status === 'draft').length
 
   return NextResponse.json({
+    // HEADLINE METRIC (reviewer request): VERIFIED CUSTOMERS ACQUIRED WITH $0 PAID SPEND
+    headline: {
+      verifiedCustomers: totalCustomers,
+      paidSpend: 0, // always $0 in this milestone
+      verifiedRevenue: capital.earnedRevenue,
+      prospects: prospects.length,
+      outreachSent,
+    },
     capital: {
       verifiedAvailable: capital.verifiedAvailable,
       syntheticAvailable: capital.syntheticAvailable,
@@ -51,6 +67,7 @@ export const GET = withTenant(async (_req, { ctx }) => {
       synthetic: capital.synthetic,
       currency: capital.currency,
       isZeroVerifiedCapital: capital.verifiedAvailable <= 0,
+      hasEarnedRealRevenue: capital.earnedRevenue > 0,
     },
     funnel: {
       prospectsIdentified: prospects.length,
@@ -63,6 +80,12 @@ export const GET = withTenant(async (_req, { ctx }) => {
       totalSignups,
       totalCustomers,
       totalRevenue,
+    },
+    diagnosticFunnel: {
+      total: diagnosticRunsTotal,
+      promotedToProspect,
+      rejected,
+      pendingReview,
     },
     experiments: experiments.map((e) => ({
       id: e.id,
@@ -87,6 +110,7 @@ export const GET = withTenant(async (_req, { ctx }) => {
       revenue: agg.revenue,
     })),
     pendingApprovals,
+    drafts,
     cashSpend: 0, // always $0 in this milestone
   })
 })

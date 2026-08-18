@@ -208,6 +208,7 @@ import type {
   Prospect,
   Outreach,
   ContentAsset,
+  DiagnosticRun,
 } from '@prisma/client'
 
 type DelegateOf<M> = PrismaClient[Extract<keyof PrismaClient, string> & string] extends never ? never : {
@@ -259,6 +260,7 @@ export const t = {
   prospect: tenantModel<DelegateOf<Prospect>>('prospect'),
   outreach: tenantModel<DelegateOf<Outreach>>('outreach'),
   contentAsset: tenantModel<DelegateOf<ContentAsset>>('contentAsset'),
+  diagnosticRun: tenantModel<DelegateOf<DiagnosticRun>>('diagnosticRun'),
 }
 
 // The `tenant` model itself is special: it must be readable WITHOUT a
