@@ -203,6 +203,7 @@ import type {
   Policy,
   User,
   SecretRef,
+  CapitalLedgerEntry,
 } from '@prisma/client'
 
 type DelegateOf<M> = PrismaClient[Extract<keyof PrismaClient, string> & string] extends never ? never : {
@@ -249,6 +250,7 @@ export const t = {
   auditLog: tenantModel<DelegateOf<AuditLog>>('auditLog'),
   policy: tenantModel<DelegateOf<Policy>>('policy'),
   user: tenantModel<DelegateOf<User>>('user'),
+  capitalLedgerEntry: tenantModel<DelegateOf<CapitalLedgerEntry>>('capitalLedgerEntry'),
 }
 
 // The `tenant` model itself is special: it must be readable WITHOUT a

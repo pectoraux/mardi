@@ -30,6 +30,7 @@ model Tenant {
   autonomyLevel Int      @default(1) // Section 22: 0..5
   isolationMode String   @default("pooled") // pooled | silo
   learningOptIn Boolean  @default(false) // cross-tenant aggregated priors
+  executionMode String   @default("SIMULATION") // SIMULATION | SANDBOX | LIVE (ADR-0005)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -54,6 +55,34 @@ model Tenant {
   auditLogs     AuditLog[]
   policies      Policy[]
   approvals     Approval[]
+  capitalLedgerEntries CapitalLedgerEntry[]
+}
+
+// -----------------------------------------------------------------------------
+// 0b. CAPITAL LEDGER — Zero-Capital Growth Engine
+// -----------------------------------------------------------------------------
+// Tracks available/committed/spent capital + expected/realized returns +
+// reinvestment pool. When available capital = $0, the decision engine
+// prioritizes zero-capital channels (organic, SEO, tools, outreach,
+// referrals, community, PLG). Once revenue exists, it flows back into the
+// reinvestment pool.
+
+model CapitalLedgerEntry {
+  id            String   @id @default(cuid())
+  tenantId      String
+  type          String   // AVAILABLE | COMMITTED | SPENT | EXPECTED_RETURN | REALIZED_RETURN | REINVESTMENT
+  amount        Float
+  currency      String   @default("USD")
+  source        String   // bootstrap | revenue | experiment | grant | ...
+  referenceType String?  // Campaign | Experiment | Decision | ...
+  referenceId   String?
+  description   String?
+  createdAt     DateTime @default(now())
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, type])
+  @@index([referenceType, referenceId])
 }
 
 model Organization {
@@ -490,6 +519,13 @@ model Recommendation {
   nextBestExperiment       String?
   status                   String  @default("proposed") // proposed | approved | rejected | executed | learned
   generatedBy              String  @default("decision_engine")
+  // AI versioning (Section 26 + hardening pass) — full provenance for every AI-generated recommendation
+  aiProvider               String? // zai | openai | anthropic | gemini | local
+  aiModel                  String? // glm-4.6 | gpt-4o | claude-3-5-sonnet | ...
+  aiModelVersion           String? // model version string
+  aiPromptVersion          String? // v1, v2, ...
+  aiToolSchemaVersion      String? // tool schema version
+  aiAgentVersion           String? // agent version string
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
   tenant                   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -497,6 +533,7 @@ model Recommendation {
 
   @@index([tenantId])
   @@index([tenantId, status])
+  @@index([aiProvider, aiModel])
 }
 
 model Decision {
@@ -516,6 +553,7 @@ model Decision {
   actualOutcome   String?  // JSON, filled after execution
   learning        String?
   status          String   @default("recorded") // recorded | executed | measured | learned
+  executionMode   String?  // SIMULATION | SANDBOX | LIVE (ADR-0005) — mode in which the action was/will be executed
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)

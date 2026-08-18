@@ -92,10 +92,78 @@ The frozen architecture called for PostgreSQL (operational) + Iceberg (analytica
 
 Vector DB (deferred; Strategy Agent uses LLM-based relevance ranking instead), MMM/geo-experiment engine (causal estimates are produced via the Experiment Service `completeExperiment` flow), feature-flag system, SCIM, full OIDC/SAML (noted as future in `SECURITY.md`). These are documented as gaps, not silently redesigned.
 
-## 6. Related Documents
+## 6. Hexagonal Architecture (Ports & Adapters)
+
+> Introduced in the post-MVP hardening pass. See `ADR-0003`, `ADR-0004`, `ADR-0005` for the rationale.
+
+The MVP coupled the domain layer to specific infrastructure: Prisma (persistence), `z-ai-web-dev-sdk` (LLM), the in-process event bus, the in-process workflow worker, the relational `Edge` table (graph), and (in the future) the relational `Creative.embedding` column (vector) and the local file system (object storage). A senior architect's hardening review flagged the risk: *"SQLite + Prisma is being treated as if it were a production equivalent of PostgreSQL + RLS. It isn't."* The hardening pass introduces **port interfaces** in `src/lib/domain/ports/` (and `src/lib/domain/repositories/` for persistence) that the domain layer depends on, and **adapter implementations** in `src/lib/infrastructure/` that the ports are bound to at runtime. The domain layer **never** imports an infrastructure package — enforced by an ESLint `no-restricted-imports` rule that fails CI.
+
+### Diagram
+
+```
+                                ┌──────────────────────────────────────────────┐
+                                │  DOMAIN CORE                                 │
+                                │  decision-engine · experiment · evidence-    │
+                                │  graph · strategy-agent · tools · workflow   │
+                                │  (depends only on PORT INTERFACES)           │
+                                └────────────────────────┬─────────────────────┘
+                                                         │ imports
+        ┌────────────────────────────────────────────────▼────────────────────────────────────────────┐
+        │  PORT INTERFACES      (src/lib/domain/ports/   +   src/lib/domain/repositories/)            │
+        │                                                                                                │
+        │   Repository          LLMProvider        EventBus          WorkflowEngine                   │
+        │   (I*Repository)      (LLMProvider)      (EventBus)        (WorkflowEngine)                 │
+        │                                                                                                │
+        │   VectorStore         GraphStore         ObjectStore                                        │
+        │   (VectorStore)       (GraphStore)       (ObjectStore)                                      │
+        └────────────────────────┬───────────────────────────────────────────────────────────────────┘
+                                 │ implemented by
+        ┌────────────────────────▼───────────────────────────────────────────────────────────────────┐
+        │  INFRASTRUCTURE ADAPTERS    (src/lib/infrastructure/)                                       │
+        │                                                                                            │
+        │   PrismaAdapter          ZAIProvider           InProcessEventBus       InProcessWorkflow    │
+        │   (SQLite / Postgres,    OpenAIProvider        KafkaEventBus           TemporalWorkflow     │
+        │    via DATABASE_PROVIDER)AnthropicProvider     (future)                (future)             │
+        │                          GeminiProvider                                                  │
+        │                          LocalModelProvider                                              │
+        │                                                                                            │
+        │   PgVectorStore         RelationalGraphStore    LocalObjectStore                             │
+        │   (future)              (Edge table — ADR-0002)  S3ObjectStore                               │
+        │   PineconeVectorStore   Neo4jGraphStore         (future)                                    │
+        │   (future)              (future)                                                            │
+        └────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Ports in scope
+
+| Port                  | Location                                  | Adapters                                                                                   | ADR / Notes                                                   |
+| --------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| **Repository**        | `src/lib/domain/repositories/`            | `PrismaAdapter` (SQLite & Postgres via `DATABASE_PROVIDER`)                                | ADR-0003 — provider-agnostic persistence; domain never imports Prisma |
+| **LLMProvider**       | `src/lib/domain/ports/LLMProvider.ts`     | `ZAIProvider` (active), `OpenAIProvider`/`AnthropicProvider`/`GeminiProvider` (stubs), `LocalModelProvider` (fallback) | ADR-0004 — model economics can change without an agent rewrite |
+| **EventBus**          | `src/lib/domain/ports/EventBus.ts`        | `InProcessEventBus` (current MVP, durable `Event` table); `KafkaEventBus` (future)         | ADR-0001 — Kafka substitute                                   |
+| **WorkflowEngine**    | `src/lib/domain/ports/WorkflowEngine.ts`  | `InProcessWorkflowEngine` (current MVP, `Workflow`/`WorkflowStep` tables); `TemporalWorkflowEngine` (future) | ADR-0001 — Temporal substitute                                |
+| **VectorStore**       | `src/lib/domain/ports/VectorStore.ts`     | `PgVectorStore` (future, Postgres + pgvector); `PineconeVectorStore` (future)              | ADR-0001 — Vector DB deferred for MVP                          |
+| **GraphStore**        | `src/lib/domain/ports/GraphStore.ts`      | `RelationalGraphStore` (`Edge` table, current MVP); `Neo4jGraphStore` (future)             | ADR-0002 — Evidence Graph as relational edges                  |
+| **ObjectStore**       | `src/lib/domain/ports/ObjectStore.ts`     | `LocalObjectStore` (current MVP, `public/` & `db/` files); `S3ObjectStore` (future)        | ADR-0001 — Iceberg substitute                                  |
+
+### Rules
+
+1. **Domain never imports infrastructure.** `src/lib/domain/**` and `src/lib/agents/**` may import only from `src/lib/domain/**` and from declared external packages that are *not* infrastructure SDKs (`@prisma/client`, `z-ai-web-dev-sdk`, `openai`, `@anthropic-ai/sdk`, `@google/generative-ai`, vendor SDKs, cloud SDKs). Enforced by ESLint `no-restricted-imports`; CI fails on violation.
+2. **Ports are infrastructure-agnostic.** They expose domain entity types and normalized result types — never provider-native shapes (no Prisma row types, no SDK response objects).
+3. **Adapters are selected at runtime via configuration.** `DATABASE_PROVIDER` selects the persistence adapter; `LLM_PROVIDER` / `Tenant.llmProvider` selects the LLM adapter; `EVENT_BUS_PROVIDER` selects the event bus; and so on. Adapter selection is a deployment concern, not a code-change concern.
+4. **Each port has at least one fallback adapter that works without external services.** `LocalModelProvider` (deterministic, no LLM), `InProcessEventBus` (no Kafka), `LocalObjectStore` (no S3), `RelationalGraphStore` (no Neo4j). This is what lets the MVP run with `bun run dev` and no external dependencies, while production swaps adapters without code changes.
+
+### Hardening ADRs
+
+- `ADR-0003` — Repository port/adapter (provider-agnostic persistence)
+- `ADR-0004` — LLM provider abstraction (model-agnostic agent system)
+- `ADR-0005` — Execution modes (SIMULATION / SANDBOX / LIVE) — the safety axis orthogonal to autonomy level
+
+## 7. Related Documents
 
 - `TENANCY.md` — tenant isolation strategy
 - `DATA_MODEL.md` — three data planes + canonical domain model
 - `AI_ARCHITECTURE.md` — agent platform
 - `CAUSAL_ARCHITECTURE.md` — causal intelligence service
 - `ADR-0001`, `ADR-0002` — environment + evidence-graph decisions
+- `ADR-0003`, `ADR-0004`, `ADR-0005` — hardening pass (ports & adapters, LLM provider, execution modes)

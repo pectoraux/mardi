@@ -163,6 +163,7 @@ export async function recordDecision(input: {
   actionTaken: string
   assumptions?: string[]
   expectedOutcome?: Record<string, unknown>
+  executionMode?: 'SIMULATION' | 'SANDBOX' | 'LIVE'
 }): Promise<{ id: string }> {
   const rec = await t.recommendation.findUnique({ where: { id: input.recommendationId } })
   if (!rec) throw new Error('recommendation not found')
@@ -190,6 +191,7 @@ export async function recordDecision(input: {
       confidence: rec.confidence,
       actionTaken: input.actionTaken,
       status: 'recorded',
+      executionMode: input.executionMode ?? 'SIMULATION',
     },
   })
 

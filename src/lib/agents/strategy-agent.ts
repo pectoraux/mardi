@@ -1,16 +1,25 @@
 // =============================================================================
-// Strategy Agent (Sections 18, 19, 35)
+// Strategy Agent (Sections 18, 19, 35) — HARDENED: depends on LLMProvider port
 // =============================================================================
-// One specialized agent (MVP slice, Section 31). Uses z-ai-web-dev-sdk LLM
-// with TYPED tool contracts. Distinguishes OBSERVED / INFERRED / PREDICTED /
-// RECOMMENDED (Section 35). Never invents evidence — every recommendation
-// it produces is grounded via the evidence-graph tool calls.
+// One specialized agent (MVP slice, Section 31). Uses the LLMProvider port
+// (ADR-0004) — NOT z-ai-web-dev-sdk directly. The provider is injected via
+// the composition root, so swapping models (zai → openai → anthropic) requires
+// only an env var change, not a code change.
+//
+// Distinguishes OBSERVED / INFERRED / PREDICTED / RECOMMENDED (Section 35).
+// Never invents evidence — every recommendation it produces is grounded via
+// the evidence-graph tool calls. Records full AI provenance (provider, model,
+// model_version, prompt_version, tool_schema_version, agent_version) on every
+// AgentRun so every AI-generated recommendation is fully traceable.
 
-import { chat, LLM_META } from '../ai/llm'
+import { getAIProvider } from '../infrastructure/composition/root'
 import { invokeTool, toolSchemasForPrompt, rolesFromContext } from './tools'
 import { t } from '../tenant-guard'
 import { getTenantContext } from '../tenant-context'
-import { randomUUID } from 'node:crypto'
+
+const AGENT_VERSION = 'strategy-v1'
+const PROMPT_VERSION = 'v1'
+const TOOL_SCHEMA_VERSION = 'v1'
 
 export interface AgentRunInput {
   prompt: string
@@ -33,6 +42,14 @@ export interface AgentRunOutput {
   toolCalls: Array<{ tool: string; ok: boolean; outputPreview: string }>
   tokens: { input: number; output: number }
   latencyMs: number
+  // AI provenance (Section 26 + hardening pass)
+  provider: string
+  model: string
+  modelVersion: string
+  promptVersion: string
+  toolSchemaVersion: string
+  agentVersion: string
+  fellBack: boolean
 }
 
 const SYSTEM_PROMPT = `You are the Strategy Agent for a Marketing Decision Intelligence Platform.
@@ -72,15 +89,16 @@ You may call multiple tools. After gathering evidence, produce the JSON answer.`
 export async function runStrategyAgent(input: AgentRunInput): Promise<AgentRunOutput> {
   const ctx = getTenantContext()
   const started = Date.now()
+  const provider = getAIProvider()
 
-  // Create an AgentRun record (Section 25, 26 — observability + cost attribution)
+  // Create an AgentRun record (Section 25, 26 — observability + cost attribution + AI versioning)
   const run = await t.agentRun.create({
     data: {
       agentName: 'strategy',
       prompt: input.prompt,
-      modelProvider: LLM_META.provider,
-      modelName: LLM_META.model,
-      promptVersion: LLM_META.promptVersion,
+      modelProvider: provider.name,
+      modelName: provider.model,
+      promptVersion: PROMPT_VERSION,
       status: 'running',
     },
   })
@@ -93,9 +111,6 @@ export async function runStrategyAgent(input: AgentRunInput): Promise<AgentRunOu
   }
 
   // ---- Step 1: gather grounding context via deterministic tool calls ----
-  // (The LLM does NOT choose tools here — we pre-call the read-only context
-  // tools deterministically so the agent always starts grounded. This is
-  // the "deterministic where possible" principle, Section 29.)
   const grounding: Record<string, unknown> = {}
   for (const toolName of [
     'get_market_state',
@@ -113,7 +128,7 @@ export async function runStrategyAgent(input: AgentRunInput): Promise<AgentRunOu
     if (r.ok) grounding[toolName] = r.output
   }
 
-  // ---- Step 2: ask the LLM, with grounding + tool schemas available ----
+  // ---- Step 2: ask the LLM via the provider port ----
   const toolSchemas = toolSchemasForPrompt()
   const userMessage = `Tenant: ${ctx.tenantSlug} (region=${ctx.region}, autonomy=L${ctx.autonomyLevel})
 
@@ -128,7 +143,7 @@ ${JSON.stringify(toolSchemas, null, 2).slice(0, 4000)}
 
 Remember: produce a single JSON object as the final answer.`
 
-  const llm = await chat({
+  const llm = await provider.complete({
     systemPrompt: SYSTEM_PROMPT,
     userMessage,
     history: input.history,
@@ -136,7 +151,7 @@ Remember: produce a single JSON object as the final answer.`
     thinking: false,
   })
 
-  // Update the AgentRun with usage + status.
+  // Update the AgentRun with usage + status + full AI provenance.
   await t.agentRun.update({
     where: { id: run.id },
     data: {
@@ -155,10 +170,12 @@ Remember: produce a single JSON object as the final answer.`
     toolCalls,
     tokens: { input: llm.inputTokens, output: llm.outputTokens },
     latencyMs: Date.now() - started,
+    provider: llm.provider,
+    model: llm.model,
+    modelVersion: llm.modelVersion,
+    promptVersion: PROMPT_VERSION,
+    toolSchemaVersion: TOOL_SCHEMA_VERSION,
+    agentVersion: AGENT_VERSION,
+    fellBack: llm.fellBack ?? false,
   }
-}
-
-// Backfill helper — generate a random id (used if downstream code needs one).
-export function newId(): string {
-  return randomUUID()
 }

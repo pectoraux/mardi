@@ -17,7 +17,6 @@ import {
   buildContext, getTenantBySlug, withTenantContext, TenantContextError,
 } from '../src/lib/tenant-context'
 import { t, TenantIsolationViolation } from '../src/lib/tenant-guard'
-import './test-sync' // ensure connectors are registered (side-effect import)
 
 let passed = 0
 let failed = 0
