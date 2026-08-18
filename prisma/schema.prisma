@@ -1,0 +1,643 @@
+// =============================================================================
+// Marketing Decision Intelligence Platform — Canonical Domain Schema
+// =============================================================================
+// PostgreSQL (Neon) — multi-tenant with application-level TenantContext
+// (AsyncLocalStorage) + repository-layer tenant_id enforcement (defense in
+// depth). Raw source records retained per Section 10. Lineage is first-class
+// via `lineage_id` + `Edge`.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// -----------------------------------------------------------------------------
+// 0. TENANCY & IDENTITY (operational)
+// -----------------------------------------------------------------------------
+
+model Tenant {
+  id            String   @id @default(cuid())
+  slug          String   @unique
+  name          String
+  plan          String   @default("standard") // standard | enterprise
+  region        String   @default("us-east-1")
+  autonomyLevel Int      @default(1) // Section 22: 0..5
+  isolationMode String   @default("pooled") // pooled | silo
+  learningOptIn Boolean  @default(false) // cross-tenant aggregated priors
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  organizations Organization[]
+  brands        Brand[]
+  users         User[]
+  connectors    Connector[]
+  campaigns     Campaign[]
+  experiments   Experiment[]
+  recommendations Recommendation[]
+  decisions     Decision[]
+  events        Event[]
+  rawRecords    RawRecord[]
+  customers     Customer[]
+  audiences     Audience[]
+  creatives     Creative[]
+  causalEstimates CausalEstimate[]
+  edges         Edge[]
+  workflows     Workflow[]
+  agentRuns     AgentRun[]
+  agentToolCalls AgentToolCall[]
+  auditLogs     AuditLog[]
+  policies      Policy[]
+  approvals     Approval[]
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+model User {
+  id        String   @id @default(cuid())
+  tenantId  String?  // nullable for admin users who span all tenants
+  email     String   @unique
+  name      String
+  password  String?  // hashed (nullable for seed users without login)
+  roles     String   @default("marketer") // csv: ceo,cmo,marketer,analyst,admin
+  isDemo    Boolean  @default(false) // demo accounts with quick login
+  isActive  Boolean  @default(true) // deactivated users cannot log in
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  approvals Approval[]
+
+  @@index([tenantId])
+}
+
+model WaitlistEntry {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String
+  password      String   // hashed — used when admin creates the account
+  requestedRole String   @default("marketer")
+  tenantSlug    String?  // requested tenant, or null for admin to decide
+  status        String   @default("pending") // pending | approved | rejected
+  reviewedBy    String?
+  reviewedAt    DateTime?
+  createdUserId String?  // the User id created on approval
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Policy {
+  // Section 22 — tenant-configurable autonomy policy
+  id              String   @id @default(cuid())
+  tenantId        String
+  name            String
+  maxSpendChangePct Float  @default(10)
+  allowedChannels String   @default("google_ads,meta,email")
+  allowedActions  String   @default("pause,publish_draft,create_experiment")
+  requiresApproval Boolean @default(true)
+  riskThreshold   Float    @default(0.3)
+  operatingHours  String   @default("00-24")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+// -----------------------------------------------------------------------------
+// 1. BRAND / PRODUCT / MARKET (operational)
+// -----------------------------------------------------------------------------
+
+model Brand {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  category    String?
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  products    Product[]
+  campaigns   Campaign[]
+  creatives   Creative[]
+
+  @@index([tenantId])
+}
+
+model Product {
+  id        String   @id @default(cuid())
+  tenantId  String
+  brandId   String
+  name      String
+  price     Float
+  currency  String   @default("USD")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  brand     Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([brandId])
+}
+
+// -----------------------------------------------------------------------------
+// 2. CUSTOMER / AUDIENCE (operational + analytical)
+// -----------------------------------------------------------------------------
+
+model Customer {
+  id          String   @id @default(cuid())
+  tenantId    String
+  externalId  String?
+  email       String?
+  name        String?
+  segment     String?  // new | returning | vip | churned
+  ltv         Float    @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  interactions Interaction[]
+
+  @@index([tenantId])
+  @@index([tenantId, segment])
+}
+
+model Audience {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+  size        Int      @default(0)
+  criteria    String   // JSON: { segment, ltv_min, ... }
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+// -----------------------------------------------------------------------------
+// 3. CREATIVE (operational)
+// -----------------------------------------------------------------------------
+
+model Creative {
+  id          String   @id @default(cuid())
+  tenantId    String
+  brandId     String?
+  name        String
+  format      String   @default("image") // image | video | text | carousel
+  channel     String?
+  hook        String?
+  promise     String?
+  cta         String?
+  embedding   String?  // JSON vec (deferred for MVP)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  brand       Brand?   @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  ads         Ad[]
+
+  @@index([tenantId])
+  @@index([tenantId, channel])
+}
+
+// -----------------------------------------------------------------------------
+// 4. CAMPAIGN / ADSET / AD (operational)
+// -----------------------------------------------------------------------------
+
+model Campaign {
+  id          String   @id @default(cuid())
+  tenantId    String
+  brandId     String?
+  externalId  String?
+  name        String
+  channel     String   // google_ads | meta | shopify_email | tiktok | ...
+  status      String   @default("draft") // draft | active | paused | completed
+  objective   String?  // awareness | consideration | conversion | retention
+  budget      Float    @default(0)
+  spent       Float    @default(0)
+  startDate   DateTime?
+  endDate     DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  brand       Brand?   @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  adsets      AdSet[]
+  experiments Experiment[]
+
+  @@index([tenantId])
+  @@index([tenantId, channel])
+  @@index([tenantId, status])
+}
+
+model AdSet {
+  id          String   @id @default(cuid())
+  campaignId  String
+  tenantId    String
+  name        String
+  audienceId  String?
+  bid         Float    @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  ads         Ad[]
+
+  @@index([tenantId])
+  @@index([campaignId])
+}
+
+model Ad {
+  id          String   @id @default(cuid())
+  adsetId     String
+  creativeId  String?
+  tenantId    String
+  name        String
+  status      String   @default("active")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  adset       AdSet    @relation(fields: [adsetId], references: [id], onDelete: Cascade)
+  creative    Creative? @relation(fields: [creativeId], references: [id], onDelete: SetNull)
+  interactions Interaction[]
+
+  @@index([tenantId])
+  @@index([adsetId])
+}
+
+// -----------------------------------------------------------------------------
+// 5. INTERACTION (analytical — derived from raw events)
+// -----------------------------------------------------------------------------
+
+model Interaction {
+  id          String   @id @default(cuid())
+  tenantId    String
+  customerId  String?
+  adId        String?
+  type        String   // impression | click | view | visit | lead | purchase | revenue
+  value       Float    @default(0)
+  occurredAt  DateTime
+  source      String?
+  lineageId   String?
+  createdAt   DateTime @default(now())
+  customer    Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  ad          Ad?      @relation(fields: [adId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, type])
+  @@index([tenantId, occurredAt])
+}
+
+// -----------------------------------------------------------------------------
+// 6. CONNECTOR FRAMEWORK (Section 9)
+// -----------------------------------------------------------------------------
+
+model Connector {
+  id           String   @id @default(cuid())
+  tenantId     String
+  type         String   // google_ads | shopify | meta | ga4 | salesforce | ...
+  name         String
+  status       String   @default("connected") // connected | syncing | error | disconnected
+  lastSyncAt   DateTime?
+  lastSyncStatus String?  // ok | partial | failed
+  lastError    String?
+  recordsPulled Int     @default(0)
+  config       String   // JSON (no secrets — secrets live in SecretRef)
+  secretRefId  String?  // reference to SecretRef
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  rawRecords   RawRecord[]
+
+  @@index([tenantId])
+  @@index([tenantId, type])
+}
+
+model SecretRef {
+  // Section 24: Credentials must NEVER live in ordinary business tables.
+  id        String   @id @default(cuid())
+  label     String
+  // In production this would reference a vault entry. Here we store an
+  // opaque pointer only — the actual secret is held in the environment.
+  vaultKey  String
+  createdAt DateTime @default(now())
+}
+
+// -----------------------------------------------------------------------------
+// 7. RAW RECORDS + EVENTS + LINEAGE (Sections 8, 10)
+// -----------------------------------------------------------------------------
+
+model RawRecord {
+  // Preserves the RAW source verbatim (Section 10: never destroy raw source records).
+  id             String   @id @default(cuid())
+  tenantId       String
+  connectorId    String
+  source         String
+  sourceRecordId String
+  entityType     String   // campaign | ad | customer | order | interaction | ...
+  payload        String   // JSON: verbatim source record
+  schemaVersion  Int      @default(1)
+  dataQuality    String   @default("pending") // pending | valid | invalid
+  ingestedAt     DateTime @default(now())
+  occurredAt     DateTime?
+  lineageId      String   @default(cuid())
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  connector      Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  @@unique([connectorId, sourceRecordId])
+  @@index([tenantId])
+  @@index([tenantId, entityType])
+  @@index([lineageId])
+}
+
+model Event {
+  // Section 8 — durable, replayable, versioned, idempotent events.
+  id           String   @id @default(cuid())
+  eventId      String   @unique // idempotency key (tenant + source + sequence)
+  tenantId     String
+  eventType    String   // customer_created | impression_created | experiment_completed | ...
+  entityType   String?
+  entityId     String?
+  source       String
+  occurredAt   DateTime
+  ingestedAt   DateTime @default(now())
+  schemaVersion Int     @default(1)
+  payload      String   // JSON
+  lineageId    String?
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, eventType])
+  @@index([tenantId, occurredAt])
+  @@index([lineageId])
+}
+
+// -----------------------------------------------------------------------------
+// 8. EVIDENCE GRAPH (Section 11)
+// -----------------------------------------------------------------------------
+
+model Edge {
+  // Generic graph edge — models the Evidence Graph (and customer/market graphs).
+  id           String   @id @default(cuid())
+  tenantId     String
+  sourceType   String   // Recommendation | Experiment | Observation | ...
+  sourceId     String
+  relation     String   // based_on | supported_by | informed_by | caused | measured_by | ...
+  targetType   String
+  targetId     String
+  weight       Float    @default(1)
+  createdAt    DateTime @default(now())
+  metadata     String?  // JSON
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, sourceType, sourceId, relation, targetType, targetId])
+  @@index([tenantId])
+  @@index([tenantId, sourceType, sourceId])
+  @@index([tenantId, targetType, targetId])
+}
+
+// -----------------------------------------------------------------------------
+// 9. EXPERIMENT SERVICE (Section 13)
+// -----------------------------------------------------------------------------
+
+model Experiment {
+  id              String   @id @default(cuid())
+  tenantId        String
+  campaignId      String?
+  name            String
+  hypothesis      String
+  objective       String
+  population      String?  // JSON
+  primaryMetric   String
+  secondaryMetrics String? // JSON csv
+  guardrailMetrics String? // JSON csv
+  methodology     String   @default("ab_test") // ab_test | holdout | geo | uplift
+  status          String   @default("draft") // draft | running | completed | analyzed
+  sampleSize      Int      @default(0)
+  durationDays    Int      @default(14)
+  startDate       DateTime?
+  endDate         DateTime?
+  decision        String?  // ship | iterate | kill
+  learning        String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaign        Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  causalEstimates CausalEstimate[]
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+// -----------------------------------------------------------------------------
+// 10. CAUSAL INTELLIGENCE (Section 12)
+// -----------------------------------------------------------------------------
+
+model CausalEstimate {
+  id              String   @id @default(cuid())
+  tenantId        String
+  experimentId    String?
+  campaignId      String?
+  metric          String   // revenue | conversions | roas | ...
+  treatment       String
+  control         String
+  methodology     String   // ab_test | holdout | geo_experiment | mmm | uplift | did
+  effectSize      Float    // incremental lift (absolute)
+  effectSizePct   Float    // incremental lift (%)
+  uncertaintyLow  Float
+  uncertaintyHigh Float
+  confidence      Float    @default(0.5) // 0..1
+  population      String?
+  observationWindowDays Int @default(14)
+  assumptions     String?  // JSON
+  modelVersion    String
+  sourceData      String?  // JSON references
+  createdAt       DateTime @default(now())
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  experiment      Experiment? @relation(fields: [experimentId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, methodology])
+}
+
+// -----------------------------------------------------------------------------
+// 11. DECISION ENGINE + LEDGER (Sections 15, 23)
+// -----------------------------------------------------------------------------
+
+model Recommendation {
+  id                       String   @id @default(cuid())
+  tenantId                 String
+  opportunity              String
+  recommendation           String
+  expectedIncrementalProfit Float  @default(0)
+  expectedIncrementalRevenue Float @default(0)
+  confidence               Float   @default(0.5)
+  uncertainty              String? // JSON {low, high}
+  risks                    String? // JSON []
+  constraints              String? // JSON []
+  nextBestExperiment       String?
+  status                   String  @default("proposed") // proposed | approved | rejected | executed | learned
+  generatedBy              String  @default("decision_engine")
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+  tenant                   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  decision                 Decision? @relation("DecisionRecommendation")
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+model Decision {
+  // Section 23 — immutable Decision Ledger
+  id              String   @id @default(cuid())
+  tenantId        String
+  recommendationId String? @unique
+  objective       String
+  recommendation  String
+  evidence        String   // JSON []
+  modelsUsed      String?  // JSON []
+  assumptions     String?  // JSON []
+  expectedOutcome String?  // JSON
+  confidence      Float    @default(0.5)
+  approverId      String?
+  actionTaken     String?
+  actualOutcome   String?  // JSON, filled after execution
+  learning        String?
+  status          String   @default("recorded") // recorded | executed | measured | learned
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  recommendationRef Recommendation? @relation("DecisionRecommendation", fields: [recommendationId], references: [id], onDelete: SetNull)
+  approvals       Approval[]
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+model Approval {
+  id          String   @id @default(cuid())
+  tenantId    String
+  decisionId  String
+  approverId  String?
+  approverEmail String
+  decision    String   // approved | rejected | changes_requested
+  note        String?
+  createdAt   DateTime @default(now())
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  decisionRef Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  user        User?    @relation(fields: [approverId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([decisionId])
+}
+
+// -----------------------------------------------------------------------------
+// 12. WORKFLOW ORCHESTRATION (Section 21)
+// -----------------------------------------------------------------------------
+
+model Workflow {
+  id          String   @id @default(cuid())
+  tenantId    String
+  type        String   // research_to_launch | ingestion | experiment_run | ...
+  status      String   @default("pending") // pending | running | completed | failed | paused
+  input       String?  // JSON
+  output      String?  // JSON
+  steps       WorkflowStep[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+model WorkflowStep {
+  id          String   @id @default(cuid())
+  workflowId  String
+  name        String
+  status      String   @default("pending") // pending | running | completed | failed | skipped
+  attempt     Int      @default(0)
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  output      String?  // JSON
+  error       String?
+  workflow    Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId])
+}
+
+// -----------------------------------------------------------------------------
+// 13. AGENT RUNS + TOOL CALLS (Sections 18, 24, 25, 26)
+// -----------------------------------------------------------------------------
+
+model AgentRun {
+  id          String   @id @default(cuid())
+  tenantId    String
+  agentName   String   // strategy | research | measurement | opportunity | ...
+  prompt      String
+  output      String?  // JSON
+  modelProvider String @default("z-ai")
+  modelName   String   @default("glm-4.6")
+  promptVersion String @default("v1")
+  inputTokens Int      @default(0)
+  outputTokens Int     @default(0)
+  latencyMs   Int      @default(0)
+  status      String   @default("running") // running | completed | failed
+  error       String?
+  createdAt   DateTime @default(now())
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  toolCalls   AgentToolCall[]
+
+  @@index([tenantId])
+  @@index([tenantId, agentName])
+}
+
+model AgentToolCall {
+  id          String   @id @default(cuid())
+  tenantId    String
+  agentRunId  String
+  toolName    String   // get_market_state | get_evidence | query_experiments | ...
+  input       String   // JSON
+  output      String?  // JSON
+  authorized  Boolean  @default(true)
+  durationMs  Int      @default(0)
+  createdAt   DateTime @default(now())
+  agentRun    AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([agentRunId])
+}
+
+// -----------------------------------------------------------------------------
+// 14. AUDIT LOG (Section 24 — immutable audit logs)
+// -----------------------------------------------------------------------------
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  tenantId    String
+  actorType   String   // user | agent | system
+  actorId     String?
+  action      String
+  entityType  String?
+  entityId    String?
+  detail      String?  // JSON
+  createdAt   DateTime @default(now())
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, action])
+  @@index([tenantId, createdAt])
+}
