@@ -50,24 +50,36 @@ export const GET = withTenant(async (_req, { ctx }) => {
   const drafts = outreaches.filter((o) => o.status === 'draft').length
 
   return NextResponse.json({
-    // HEADLINE METRIC (reviewer request): VERIFIED CUSTOMERS ACQUIRED WITH $0 PAID SPEND
+    // HEADLINE METRIC — only PAYMENT_VERIFIED customers count
     headline: {
-      verifiedCustomers: totalCustomers,
+      verifiedCustomers: capital.verifiedCustomerCount,
       paidSpend: 0, // always $0 in this milestone
-      verifiedRevenue: capital.earnedRevenue,
+      verifiedRevenue: capital.grossRevenue, // gross revenue from payment-verified
+      manuallyAssertedRevenue: capital.manuallyAsserted, // asserted but NOT verified
       prospects: prospects.length,
       outreachSent,
     },
     capital: {
       verifiedAvailable: capital.verifiedAvailable,
+      manuallyAsserted: capital.manuallyAsserted,
       syntheticAvailable: capital.syntheticAvailable,
+      // Contribution profit chain
+      grossRevenue: capital.grossRevenue,
+      contributionProfit: capital.contributionProfit,
+      reinvestmentRate: capital.reinvestmentRate,
+      totalRefunds: capital.totalRefunds,
+      totalPaymentFees: capital.totalPaymentFees,
+      totalCostOfDelivery: capital.totalCostOfDelivery,
+      totalTaxes: capital.totalTaxes,
+      // Legacy
       earnedRevenue: capital.earnedRevenue,
       ownerFunded: capital.ownerFunded,
       reinvestedProfit: capital.reinvestedProfit,
       synthetic: capital.synthetic,
       currency: capital.currency,
       isZeroVerifiedCapital: capital.verifiedAvailable <= 0,
-      hasEarnedRealRevenue: capital.earnedRevenue > 0,
+      hasPaymentVerifiedRevenue: capital.verifiedCustomerCount > 0,
+      verifiedCustomerCount: capital.verifiedCustomerCount,
     },
     funnel: {
       prospectsIdentified: prospects.length,

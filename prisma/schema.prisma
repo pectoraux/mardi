@@ -79,13 +79,26 @@ model CapitalLedgerEntry {
   amount             Float
   currency           String   @default("USD")
   source             String   // bootstrap | revenue | experiment | grant | ...
-  // CAPITAL PROVENANCE (milestone 1) — capital has explicit origin so the
-  // platform can never fool itself into thinking synthetic/test capital is
-  // earned revenue.
+  // CAPITAL PROVENANCE — capital has explicit origin so the platform can
+  // never fool itself into thinking synthetic/test capital is earned revenue.
   provenance         String   @default("SYNTHETIC") // SYNTHETIC | OWNER_FUNDED | EARNED_REVENUE | REINVESTED_PROFIT
-  verificationStatus String   @default("UNVERIFIED") // UNVERIFIED | VERIFIED | DISPUTED
+  // VERIFICATION LEVEL (reviewer fix) — only PAYMENT_VERIFIED counts toward
+  // "VERIFIED CUSTOMER / VERIFIED REVENUE" in the headline metric.
+  // manual_verification → MANUALLY_ASSERTED (does NOT count as verified).
+  verificationLevel  String   @default("SIMULATED") // SIMULATED | TEST | MANUALLY_ASSERTED | PAYMENT_VERIFIED
   verifiedAt         DateTime?
   verifiedBy         String?
+  // CONTRIBUTION PROFIT CHAIN (reviewer fix) — revenue ≠ profit ≠ available
+  // capital. For EARNED_REVENUE entries, these fields record the full chain:
+  //   revenue − refunds − paymentFees − costOfDelivery − taxes = contributionProfit
+  //   contributionProfit × reinvestmentRate = available marketing capital
+  grossRevenue       Float?
+  refunds            Float    @default(0)
+  paymentFees        Float    @default(0)
+  costOfDelivery     Float    @default(0)
+  taxes              Float    @default(0)
+  contributionProfit Float?
+  reinvestmentRate   Float?   // 0..1, conservative default applied by service
   referenceType      String?  // Campaign | Experiment | Decision | GrowthExperiment | ...
   referenceId        String?
   description        String?

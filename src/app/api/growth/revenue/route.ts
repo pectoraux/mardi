@@ -7,31 +7,44 @@ import { getTenantContext } from '@/lib/tenant-context'
 import { emit } from '@/lib/event-bus'
 
 // =============================================================================
-// Revenue Verification API (milestone 4 — conversion + revenue verification)
+// Revenue Verification API (milestone 4 + reviewer fixes)
 // =============================================================================
-// The first customer must be explicitly marked REAL with a source of truth
-// for payment. Then EARNED_REVENUE capital is created automatically. Only
-// then does the Growth Decision Engine gain actual marketing capital.
+// REVIEWER FIX 1: verificationLevel is derived from paymentSource:
+//   manual_verification / invoice → MANUALLY_ASSERTED (does NOT count as verified)
+//   stripe / paypal / payment_provider → PAYMENT_VERIFIED (counts as verified)
+// Only PAYMENT_VERIFIED counts toward "VERIFIED CUSTOMER / VERIFIED REVENUE".
+//
+// REVIEWER FIX 2: contribution profit chain.
+//   grossRevenue − refunds − paymentFees − costOfDelivery − taxes = contributionProfit
+//   contributionProfit × reinvestmentRate (default 0.5) = marketing capital
+// Revenue is NOT automatically available capital.
 
 export const POST = withTenant(async (req: NextRequest, _ctx) => {
   const body = await req.json().catch(() => ({}))
   const {
     prospectId, outreachId, growthExperimentId,
     amount, currency, paymentSource, paymentReference, customerName, notes,
+    refunds, paymentFees, costOfDelivery, taxes, reinvestmentRate,
   } = (body ?? {}) as {
     prospectId?: string
     outreachId?: string
     growthExperimentId?: string
-    amount: number
+    amount: number // gross revenue
     currency?: string
     paymentSource: string // stripe | invoice | paypal | manual_verification
     paymentReference?: string
     customerName?: string
     notes?: string
+    // Optional contribution profit breakdown (defaults: estimated fees, 0 for others)
+    refunds?: number
+    paymentFees?: number
+    costOfDelivery?: number
+    taxes?: number
+    reinvestmentRate?: number
   }
 
   if (!amount || amount <= 0) {
-    return NextResponse.json({ error: 'amount must be positive' }, { status: 400 })
+    return NextResponse.json({ error: 'amount (gross revenue) must be positive' }, { status: 400 })
   }
   if (!paymentSource) {
     return NextResponse.json({ error: 'paymentSource required (stripe | invoice | paypal | manual_verification)' }, { status: 400 })
@@ -41,14 +54,21 @@ export const POST = withTenant(async (req: NextRequest, _ctx) => {
   const repo = getRepository()
   const capitalService = createCapitalProvenanceService(repo)
 
-  // 1. Record the verified earned revenue
-  await capitalService.recordEarnedRevenue(ctx, {
-    amount,
-    source: paymentSource,
+  // 1. Record the earned revenue with the full contribution profit chain.
+  //    Returns verificationLevel + contributionProfit + marketingCapital.
+  const revenueResult = await capitalService.recordEarnedRevenue(ctx, {
+    grossRevenue: amount,
+    paymentSource,
+    paymentReference,
     referenceType: 'Prospect',
     referenceId: prospectId ?? null,
-    description: `Verified revenue from ${customerName ?? 'customer'}. Payment ref: ${paymentReference ?? 'N/A'}. ${notes ?? ''}`.trim(),
+    description: `Revenue from ${customerName ?? 'customer'}. ${notes ?? ''}`.trim(),
     verifiedBy: ctx.userId ?? 'operator',
+    refunds,
+    paymentFees,
+    costOfDelivery,
+    taxes,
+    reinvestmentRate,
   })
 
   // 2. Update the prospect status to converted
@@ -81,7 +101,8 @@ export const POST = withTenant(async (req: NextRequest, _ctx) => {
         where: { id: experimentId },
         data: {
           customers: exp.customers + 1,
-          revenue: exp.revenue + amount,
+          revenue: exp.revenue + amount, // gross revenue
+          contributionMargin: exp.contributionMargin + revenueResult.contributionProfit,
           signups: exp.signups + 1,
           activatedUsers: exp.activatedUsers + 1,
         },
@@ -95,31 +116,44 @@ export const POST = withTenant(async (req: NextRequest, _ctx) => {
     entityType: 'Prospect',
     entityId: prospectId ?? null,
     properties: {
-      amount,
-      currency: currency ?? 'USD',
+      grossRevenue: amount,
+      contributionProfit: revenueResult.contributionProfit,
+      marketingCapital: revenueResult.marketingCapital,
+      verificationLevel: revenueResult.verificationLevel,
       paymentSource,
       customerName,
-      verified: true,
+      // Only PAYMENT_VERIFIED counts as a real verified customer
+      verified: revenueResult.verificationLevel === 'PAYMENT_VERIFIED',
     },
   })
 
   // 6. Get the updated capital summary
   const summary = await capitalService.getTrustworthySummary(ctx)
 
+  const isPaymentVerified = revenueResult.verificationLevel === 'PAYMENT_VERIFIED'
+  const isFirstVerified = isPaymentVerified && summary.verifiedCustomerCount === 1
+
   return NextResponse.json({
     ok: true,
-    verified: true,
-    amount,
+    verificationLevel: revenueResult.verificationLevel,
+    paymentVerified: isPaymentVerified,
+    grossRevenue: amount,
     currency: currency ?? 'USD',
     paymentSource,
+    contributionProfit: revenueResult.contributionProfit,
+    marketingCapital: revenueResult.marketingCapital,
     capitalAfter: {
       verifiedAvailable: summary.verifiedAvailable,
+      manuallyAsserted: summary.manuallyAsserted,
       earnedRevenue: summary.earnedRevenue,
-      reinvestedProfit: summary.reinvestedProfit,
+      contributionProfit: summary.contributionProfit,
+      verifiedCustomerCount: summary.verifiedCustomerCount,
     },
-    message: amount === summary.earnedRevenue
-      ? `🎉 FIRST VERIFIED CUSTOMER! $${amount} earned revenue recorded. The Growth Decision Engine now has $${summary.verifiedAvailable.toFixed(2)} of real marketing capital.`
-      : `$${amount} verified revenue recorded. Total earned revenue: $${summary.earnedRevenue}. Available capital: $${summary.verifiedAvailable.toFixed(2)}.`,
+    message: !isPaymentVerified
+      ? `Revenue recorded as MANUALLY_ASSERTED (paymentSource=${paymentSource}). This does NOT count as a verified customer. To count, record with a payment provider (stripe/paypal) and a payment reference.`
+      : isFirstVerified
+        ? `🎉 FIRST PAYMENT-VERIFIED CUSTOMER! Gross $${amount} → contribution profit $${revenueResult.contributionProfit.toFixed(2)} → marketing capital $${revenueResult.marketingCapital.toFixed(2)} (at 50% reinvestment).`
+        : `Payment-verified revenue recorded. Marketing capital added: $${revenueResult.marketingCapital.toFixed(2)}.`,
   })
 })
 
@@ -128,11 +162,18 @@ export const GET = withTenant(async (_req, { ctx }) => {
   const capitalService = createCapitalProvenanceService(repo)
   const summary = await capitalService.getTrustworthySummary(ctx)
   return NextResponse.json({
-    verifiedRevenue: summary.earnedRevenue,
-    verifiedAvailable: summary.verifiedAvailable,
-    reinvestedProfit: summary.reinvestedProfit,
+    // HEADLINE: only PAYMENT_VERIFIED counts
+    verifiedCustomerCount: summary.verifiedCustomerCount,
+    verifiedRevenue: summary.grossRevenue, // gross revenue from payment-verified customers
+    verifiedAvailable: summary.verifiedAvailable, // spendable marketing capital
+    manuallyAsserted: summary.manuallyAsserted, // asserted but NOT payment-verified
+    // Contribution profit chain
+    grossRevenue: summary.grossRevenue,
+    contributionProfit: summary.contributionProfit,
+    reinvestmentRate: summary.reinvestmentRate,
+    // Legacy fields
     syntheticCapital: summary.synthetic,
     currency: summary.currency,
-    hasEarnedRealRevenue: summary.earnedRevenue > 0,
+    hasPaymentVerifiedRevenue: summary.verifiedCustomerCount > 0,
   })
 })
