@@ -1,19 +1,20 @@
 // =============================================================================
-// AI Visibility Subsystem (Section 32) — REAL service, not an interface
+// AI Visibility Service (Section 32) — REAL external observations
 // =============================================================================
-// Tracks brand mentions in AI systems (ChatGPT, Perplexity, Gemini, etc.),
-// AI share of voice, competitive position.
+// Two modes:
+//   REAL_EXTERNAL — uses WebSearchProvider to make actual HTTP requests
+//                   to real search engines and web pages
+//   SIMULATED     — uses LLM to simulate AI system responses (fallback only)
 //
-// Model: Brand → Query → AI System → Response → Mention → Position → Citation → Competitor
-//
-// Uses the LLMProvider to simulate AI system responses (in production, this
-// would call the actual AI APIs). All observations have provenance.
-//
-// Eventually connects: AI visibility → intervention → experiment → causal measurement
+// The UI and APIs NEVER blur this distinction. Every observation records
+// sourceType: 'real_external' or 'simulated'.
+// Only real observations can become external-market evidence.
 
 import type { TenantContext } from '../../tenant-context'
 import type { LLMProvider } from '../../application/ports'
 import { t } from '../../tenant-guard'
+import { WebSearchAIVisibilityProvider, type RealAIObservation } from '../../infrastructure/ai-visibility/WebSearchProvider'
+import { emit } from '../../event-bus'
 import { randomUUID } from 'node:crypto'
 
 export interface AIVisibilityObservation {
@@ -21,106 +22,145 @@ export interface AIVisibilityObservation {
   tenantId: string
   brand: string
   query: string
-  aiSystem: string // chatgpt | perplexity | gemini | claude
-  response: string
+  sourceType: 'real_external' | 'simulated' // NEVER blurred
+  provider: string // 'web_search' for real, 'llm:zai' for simulated
   brandMentioned: boolean
-  mentionPosition: number | null // position in response (1 = first mention)
-  competitorMentions: Array<{ name: string; position: number }>
-  attributes: string[] // what attributes are associated with the brand
-  citations: string[]
-  sources: string[]
-  confidence: number
+  mentionPositions: Array<{ url: string; position: number; context: string }>
+  competitorMentions: Array<{ name: string; url: string; count: number }>
+  attributes: string[]
+  sourceUrls: string[]
+  responseHash: string
   retrievedAt: Date
   provenance: string
+  confidence: number
+  // For real observations: the actual search results + page content
+  searchResults?: Array<{ title: string; url: string; snippet: string; position: number }>
+  pagesReadCount?: number
 }
 
 export interface AIVisibilityReport {
   brand: string
-  totalQueries: number
-  mentionRate: number // % of queries where brand was mentioned
+  totalObservations: number
+  realObservations: number
+  simulatedObservations: number
+  mentionRate: number
   avgPosition: number | null
   competitorShare: Array<{ competitor: string; mentionCount: number; share: number }>
   topAttributes: string[]
+  sourceBreakdown: { real_external: number; simulated: number }
   recommendations: string[]
 }
 
 export interface AIVisibilityService {
-  /** Query an AI system about a brand/category and record the observation. */
-  observe(ctx: TenantContext, input: {
+  /** Observe AI visibility using REAL web search (Level-3). */
+  observeReal(ctx: TenantContext, input: {
+    brand: string
+    query: string
+    competitors?: string[]
+    numResults?: number
+  }): Promise<AIVisibilityObservation>
+
+  /** Observe AI visibility using LLM simulation (Level-2, fallback only). */
+  observeSimulated(ctx: TenantContext, input: {
     brand: string
     query: string
     aiSystem?: string
     competitors?: string[]
   }): Promise<AIVisibilityObservation>
 
-  /** Generate a visibility report for a brand. */
+  /** Generate a visibility report from recorded observations. */
   getReport(ctx: TenantContext, brand: string): Promise<AIVisibilityReport>
 
-  /** List all observations for the tenant. */
-  listObservations(ctx: TenantContext, opts?: { brand?: string; limit?: number }): Promise<AIVisibilityObservation[]>
+  /** List all observations. */
+  listObservations(ctx: TenantContext, opts?: { brand?: string; sourceType?: string; limit?: number }): Promise<AIVisibilityObservation[]>
 }
 
 export function createAIVisibilityService(llm: LLMProvider): AIVisibilityService {
   return {
-    async observe(ctx, input) {
-      const aiSystem = input.aiSystem ?? 'chatgpt'
-      const competitors = input.competitors ?? []
-
-      // Use the LLM to simulate what an AI system would say in response to the query.
-      // In production, this would call the actual AI API (OpenAI, Anthropic, etc.)
-      // and parse the response for brand mentions.
-      const result = await llm.complete({
-        systemPrompt: `You are simulating the response of ${aiSystem} to a user query. Respond as ${aiSystem} would — helpful, informative, citing sources where appropriate. If the query is about a product/service category, mention relevant brands including "${input.brand}" and these competitors: ${competitors.join(', ')}. Be realistic — don't always mention the brand.
-
-Output JSON: {
-  "response": "the full text response",
-  "brandMentioned": true/false,
-  "mentionPosition": null or number (1 = first mention),
-  "competitorMentions": [{ "name": "...", "position": 1 }],
-  "attributes": ["what attributes are associated with the brand"],
-  "citations": ["sources cited"],
-  "sources": ["source URLs or names"]
-}`,
-        userMessage: `Query: "${input.query}"
-Brand: "${input.brand}"
-Competitors: ${competitors.join(', ') || 'none specified'}`,
-        json: true,
+    async observeReal(ctx, input) {
+      // Make REAL external HTTP requests via web search + page reading
+      const realObs = await WebSearchAIVisibilityProvider.observe({
+        brand: input.brand,
+        query: input.query,
+        competitors: input.competitors ?? [],
+        numResults: input.numResults ?? 5,
+        readPages: true,
       })
-
-      const parsed = (result.parsed ?? {}) as Partial<AIVisibilityObservation>
 
       const observation: AIVisibilityObservation = {
         id: randomUUID(),
         tenantId: ctx.tenantId,
         brand: input.brand,
         query: input.query,
-        aiSystem,
-        response: parsed.response ?? '',
-        brandMentioned: parsed.brandMentioned ?? false,
-        mentionPosition: parsed.mentionPosition ?? null,
-        competitorMentions: parsed.competitorMentions ?? [],
-        attributes: parsed.attributes ?? [],
-        citations: parsed.citations ?? [],
-        sources: parsed.sources ?? [],
-        confidence: result.fellBack ? 0.4 : 0.7,
-        retrievedAt: new Date(),
-        provenance: `LLM:${result.provider}:${result.model} (simulated ${aiSystem})`,
+        sourceType: 'real_external',
+        provider: 'web_search',
+        brandMentioned: realObs.brandMentioned,
+        mentionPositions: realObs.mentionPositions,
+        competitorMentions: realObs.competitorMentions,
+        attributes: realObs.attributes,
+        sourceUrls: realObs.sourceUrls,
+        responseHash: realObs.responseHash,
+        retrievedAt: realObs.retrievedAt,
+        provenance: realObs.provenance,
+        confidence: realObs.confidence,
+        searchResults: realObs.searchResults,
+        pagesReadCount: realObs.pagesRead.length,
       }
 
-      // Record the observation as an event (REAL — durable, replayable)
-      const { emit } = await import('../../event-bus')
+      // Record as durable event
       await emit('ai_visibility_observed', {
         source: 'ai_visibility_service',
         entityType: 'Brand',
         entityId: input.brand,
         properties: {
-          brand: input.brand,
-          query: input.query,
-          aiSystem,
-          brandMentioned: observation.brandMentioned,
-          mentionPosition: observation.mentionPosition,
-          competitorMentions: observation.competitorMentions,
-          attributes: observation.attributes,
+          ...observation,
+          sourceType: 'real_external',
+        },
+      })
+
+      return observation
+    },
+
+    async observeSimulated(ctx, input) {
+      const aiSystem = input.aiSystem ?? 'chatgpt'
+      // LLM simulation — clearly marked as SIMULATED, not real external
+      const result = await llm.complete({
+        systemPrompt: `You are simulating the response of ${aiSystem} to a user query. This is a SIMULATION, not a real observation. Output JSON: { "response", "brandMentioned", "mentionPosition", "competitorMentions": [], "attributes": [], "citations": [], "sources": [] }`,
+        userMessage: `Query: "${input.query}"\nBrand: "${input.brand}"\nCompetitors: ${input.competitors?.join(', ') ?? 'none'}`,
+        json: true,
+      })
+
+      const parsed = (result.parsed ?? {}) as Record<string, unknown>
+
+      const observation: AIVisibilityObservation = {
+        id: randomUUID(),
+        tenantId: ctx.tenantId,
+        brand: input.brand,
+        query: input.query,
+        sourceType: 'simulated',
+        provider: `llm:${result.provider}`,
+        brandMentioned: (parsed.brandMentioned as boolean) ?? false,
+        mentionPositions: [],
+        competitorMentions: ((parsed.competitorMentions as Array<{ name: string }>) ?? []).map((c) => ({
+          name: c.name,
+          url: '',
+          count: 1,
+        })),
+        attributes: (parsed.attributes as string[]) ?? [],
+        sourceUrls: [],
+        responseHash: '',
+        retrievedAt: new Date(),
+        provenance: `SIMULATED via LLM:${result.provider}:${result.model} — NOT a real external observation`,
+        confidence: 0.3, // LOW confidence for simulated data
+      }
+
+      await emit('ai_visibility_observed', {
+        source: 'ai_visibility_service',
+        entityType: 'Brand',
+        entityId: input.brand,
+        properties: {
+          ...observation,
+          sourceType: 'simulated',
         },
       })
 
@@ -128,7 +168,6 @@ Competitors: ${competitors.join(', ') || 'none specified'}`,
     },
 
     async getReport(ctx, brand) {
-      // Get all observations for this brand from the event log
       const events = await t.event.findMany({
         where: { eventType: 'ai_visibility_observed' },
         take: 500,
@@ -138,37 +177,40 @@ Competitors: ${competitors.join(', ') || 'none specified'}`,
         .map((e) => JSON.parse(e.payload) as Record<string, unknown>)
         .filter((p) => p.brand === brand)
 
-      const totalQueries = observations.length
-      const mentioned = observations.filter((o) => o.brandMentioned === true)
-      const mentionRate = totalQueries > 0 ? mentioned.length / totalQueries : 0
+      const totalObservations = observations.length
+      const realObs = observations.filter((o) => o.sourceType === 'real_external')
+      const simulatedObs = observations.filter((o) => o.sourceType === 'simulated')
 
-      const positions = mentioned
-        .map((o) => o.mentionPosition as number)
-        .filter((p): p is number => p !== null && p !== undefined)
+      const mentioned = observations.filter((o) => o.brandMentioned === true)
+      const mentionRate = totalObservations > 0 ? mentioned.length / totalObservations : 0
+
+      // Calculate position from real observations only
+      const positions = realObs
+        .flatMap((o) => (o.mentionPositions as Array<{ position: number }>) ?? [])
+        .map((m) => m.position)
       const avgPosition = positions.length > 0
         ? positions.reduce((s, p) => s + p, 0) / positions.length
         : null
 
-      // Competitor share
+      // Competitor share (from real observations only)
       const competitorCounts = new Map<string, number>()
-      for (const o of observations) {
-        const comps = (o.competitorMentions ?? []) as Array<{ name: string }>
-        for (const c of comps) {
-          competitorCounts.set(c.name, (competitorCounts.get(c.name) ?? 0) + 1)
+      for (const o of realObs) {
+        for (const c of (o.competitorMentions as Array<{ name: string; count: number }>) ?? []) {
+          competitorCounts.set(c.name, (competitorCounts.get(c.name) ?? 0) + c.count)
         }
       }
       const competitorShare = Array.from(competitorCounts.entries())
         .map(([name, count]) => ({
           competitor: name,
           mentionCount: count,
-          share: totalQueries > 0 ? count / totalQueries : 0,
+          share: realObs.length > 0 ? count / realObs.length : 0,
         }))
         .sort((a, b) => b.mentionCount - a.mentionCount)
 
-      // Top attributes
+      // Top attributes (from real observations only)
       const attrCounts = new Map<string, number>()
-      for (const o of observations) {
-        for (const a of (o.attributes ?? []) as string[]) {
+      for (const o of realObs) {
+        for (const a of (o.attributes as string[]) ?? []) {
           attrCounts.set(a, (attrCounts.get(a) ?? 0) + 1)
         }
       }
@@ -177,25 +219,33 @@ Competitors: ${competitors.join(', ') || 'none specified'}`,
         .slice(0, 5)
         .map(([a]) => a)
 
-      // Recommendations
       const recommendations: string[] = []
-      if (mentionRate < 0.3) {
-        recommendations.push(`Brand mention rate is ${(mentionRate * 100).toFixed(0)}% — below 30% threshold. Focus on content that AI systems cite.`)
+      if (totalObservations === 0) {
+        recommendations.push('No observations yet. Run a real observation to start tracking AI visibility.')
       }
-      if (avgPosition && avgPosition > 3) {
-        recommendations.push(`Average mention position is ${avgPosition.toFixed(1)} — competitors are mentioned first. Strengthen brand authority signals.`)
+      if (realObs.length === 0 && totalObservations > 0) {
+        recommendations.push('All observations are SIMULATED. Run real observations for trustworthy AI visibility data.')
+      }
+      if (mentionRate < 0.3 && totalObservations > 0) {
+        recommendations.push(`Brand mention rate is ${(mentionRate * 100).toFixed(0)}% — below 30% threshold.`)
       }
       if (recommendations.length === 0) {
-        recommendations.push('AI visibility is healthy. Continue monitoring for changes.')
+        recommendations.push('AI visibility tracking is active with real observations.')
       }
 
       return {
         brand,
-        totalQueries,
+        totalObservations,
+        realObservations: realObs.length,
+        simulatedObservations: simulatedObs.length,
         mentionRate,
         avgPosition,
         competitorShare,
         topAttributes,
+        sourceBreakdown: {
+          real_external: realObs.length,
+          simulated: simulatedObs.length,
+        },
         recommendations,
       }
     },
@@ -213,17 +263,17 @@ Competitors: ${competitors.join(', ') || 'none specified'}`,
           tenantId: ctx.tenantId,
           brand: p.brand as string,
           query: p.query as string,
-          aiSystem: p.aiSystem as string,
-          response: '', // not stored in event — fetch from observation store
+          sourceType: p.sourceType as 'real_external' | 'simulated',
+          provider: p.provider as string,
           brandMentioned: p.brandMentioned as boolean,
-          mentionPosition: p.mentionPosition as number | null,
-          competitorMentions: p.competitorMentions as Array<{ name: string; position: number }>,
-          attributes: p.attributes as string[],
-          citations: [],
-          sources: [],
-          confidence: 0.7,
+          mentionPositions: (p.mentionPositions as Array<{ url: string; position: number; context: string }>) ?? [],
+          competitorMentions: (p.competitorMentions as Array<{ name: string; url: string; count: number }>) ?? [],
+          attributes: (p.attributes as string[]) ?? [],
+          sourceUrls: (p.sourceUrls as string[]) ?? [],
+          responseHash: p.responseHash as string,
           retrievedAt: e.occurredAt,
-          provenance: 'ai_visibility_service',
+          provenance: p.provenance as string,
+          confidence: p.confidence as number,
         }
       })
     },

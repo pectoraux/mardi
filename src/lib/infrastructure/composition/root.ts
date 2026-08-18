@@ -140,8 +140,14 @@ export function getCausalEngine(): CausalEnginePort { return StatisticalCausalEn
 // ExecutionProvider
 export function getExecutionProvider(): ExecutionProviderPort { return PolicyControlledExecutionProvider }
 
-// PaymentProvider
-export function getPaymentProvider(): PaymentProviderPort { return ManualPaymentProvider }
+// PaymentProvider — uses Stripe when credentials available, otherwise manual
+import { StripePaymentProvider, isStripeAvailable } from '../payment/stripe/StripePaymentProvider'
+export function getPaymentProvider(): PaymentProviderPort {
+  return isStripeAvailable() ? StripePaymentProvider : ManualPaymentProvider
+}
+export function getPaymentProviderName(): string {
+  return isStripeAvailable() ? 'stripe' : 'manual (BLOCKED — no STRIPE_SECRET_KEY)'
+}
 
 // EmailProvider
 export function getEmailProvider(): EmailProviderPort { return LoggingEmailProvider }
