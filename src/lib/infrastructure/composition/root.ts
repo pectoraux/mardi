@@ -90,10 +90,104 @@ export function getExecutor(): ModeAwareExecutor {
 }
 
 // ---------------------------------------------------------------------------
+// Phase A infrastructure adapters — all ports wired here.
+// Bootstrap adapters are active. Production adapters are added behind the
+// SAME interfaces when env vars are configured.
+// ---------------------------------------------------------------------------
+
+import type {
+  EventBusPort, ObjectStorePort, VectorStorePort, GraphStorePort,
+  WorkflowEnginePort, CachePort, SearchPort, EmbeddingProvider,
+  ModelRuntimePort, ExperimentRunnerPort, CausalEnginePort,
+  ExecutionProviderPort, PaymentProviderPort, EmailProviderPort,
+  ObservabilityProviderPort,
+} from '../../application/ports'
+
+import { InProcessEventBus } from '../events/InProcessEventBus'
+import { InMemoryCache } from '../cache/InMemoryCache'
+import { InMemoryVectorStore } from '../vector/InMemoryVectorStore'
+import { RelationalGraphStore } from '../graph/RelationalGraphStore'
+import { DbWorkflowEngine } from '../workflow/DbWorkflowEngine'
+import { HashEmbeddingProvider } from '../embedding/HashEmbeddingProvider'
+import { StatisticalCausalEngine } from '../causal/StatisticalCausalEngine'
+import { PolicyControlledExecutionProvider } from '../execution/PolicyControlledExecutionProvider'
+import { ManualPaymentProvider } from '../payment/ManualPaymentProvider'
+import { LoggingEmailProvider } from '../email/LoggingEmailProvider'
+import { ConsoleObservability } from '../observability/ConsoleObservability'
+import { getCapabilityRegistry } from '../../platform/capabilities'
+
+// EventBus
+export function getEventBus(): EventBusPort { return InProcessEventBus }
+
+// Cache
+export function getCache(): CachePort { return InMemoryCache }
+
+// VectorStore
+export function getVectorStore(): VectorStorePort { return InMemoryVectorStore }
+
+// GraphStore
+export function getGraphStore(): GraphStorePort { return RelationalGraphStore }
+
+// WorkflowEngine
+export function getWorkflowEngine(): WorkflowEnginePort { return DbWorkflowEngine }
+
+// EmbeddingProvider
+export function getEmbeddingProvider(): EmbeddingProvider { return HashEmbeddingProvider }
+
+// CausalEngine
+export function getCausalEngine(): CausalEnginePort { return StatisticalCausalEngine }
+
+// ExecutionProvider
+export function getExecutionProvider(): ExecutionProviderPort { return PolicyControlledExecutionProvider }
+
+// PaymentProvider
+export function getPaymentProvider(): PaymentProviderPort { return ManualPaymentProvider }
+
+// EmailProvider
+export function getEmailProvider(): EmailProviderPort { return LoggingEmailProvider }
+
+// ObservabilityProvider
+export function getObservability(): ObservabilityProviderPort { return ConsoleObservability }
+
+// CapabilityRegistry
+export function getCapabilities() { return getCapabilityRegistry() }
+
+// Search — bootstrap uses Postgres FTS (TODO: implement when needed)
+export function getSearch(): SearchPort {
+  // TODO: implement Postgres FTS adapter
+  throw new Error('SearchPort adapter not yet implemented — use getVectorStore() for semantic search')
+}
+
+// ModelRuntime — bootstrap uses LLM provider for predictions
+export function getModelRuntime(): ModelRuntimePort {
+  // TODO: implement model registry-backed runtime
+  throw new Error('ModelRuntimePort adapter not yet implemented')
+}
+
+// ExperimentRunner — bootstrap uses the experiment service
+export function getExperimentRunner(): ExperimentRunnerPort {
+  // TODO: implement experiment runner with assignment + analysis
+  throw new Error('ExperimentRunnerPort adapter not yet implemented')
+}
+
+// ObjectStore — bootstrap uses local FS / R2
+export function getObjectStore(): ObjectStorePort {
+  // TODO: implement R2/S3 adapter
+  throw new Error('ObjectStorePort adapter not yet implemented')
+}
+
+// ---------------------------------------------------------------------------
 // Composition root export — application code imports from here.
 // ---------------------------------------------------------------------------
 export { prismaRepository, prismaIdentityRepository } from '../persistence/prisma/PrismaRepository'
 export { getLLMProvider, listProviders } from '../llm/LLMProviderRegistry'
 export type { Repository, IdentityRepository } from '../../domain/repositories'
-export type { LLMProvider, ModeAwareExecutor, ExecutionMode } from '../../application/ports'
+export type {
+  LLMProvider, ModeAwareExecutor, ExecutionMode,
+  EventBusPort, ObjectStorePort, VectorStorePort, GraphStorePort,
+  WorkflowEnginePort, CachePort, SearchPort, EmbeddingProvider,
+  ModelRuntimePort, ExperimentRunnerPort, CausalEnginePort,
+  ExecutionProviderPort, PaymentProviderPort, EmailProviderPort,
+  ObservabilityProviderPort,
+} from '../../application/ports'
 export type { TenantContext } from '../../tenant-context'
