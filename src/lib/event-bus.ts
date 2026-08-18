@@ -61,7 +61,11 @@ export async function emit(
     schema_version: 1,
     properties: payload.properties,
     lineage_id: payload.lineageId,
-  }
+    // CamelCase aliases for consumers that expect them
+    eventId,
+    tenantId,
+    eventType,
+  } as CanonicalEvent
 
   // Persist (durable). Idempotent on eventId via @unique.
   await t.event.create({
