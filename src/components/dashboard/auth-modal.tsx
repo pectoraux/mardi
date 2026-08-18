@@ -34,6 +34,7 @@ const DEMO_ACCOUNTS = [
   { email: 'demo.acme@mdip.demo', password: 'Demo1234!', label: 'Acme Marketer', role: 'marketer', tenant: 'acme' },
   { email: 'demo.cmo@mdip.demo', password: 'Demo1234!', label: 'Acme CMO', role: 'cmo', tenant: 'acme' },
   { email: 'demo.nova@mdip.demo', password: 'Demo1234!', label: 'Nova Marketer', role: 'marketer', tenant: 'nova' },
+  { email: 'demo.mardi@mdip.demo', password: 'Demo1234!', label: 'MARDI Growth', role: 'admin', tenant: 'mardi_internal' },
   { email: 'demo.admin@mdip.demo', password: 'Demo1234!', label: 'Demo Admin', role: 'admin', tenant: null },
 ]
 

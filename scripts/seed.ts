@@ -24,7 +24,9 @@ async function main() {
     'approval', 'decision', 'recommendation', 'causalEstimate', 'experiment',
     'edge', 'event', 'rawRecord', 'interaction', 'ad', 'adSet', 'creative',
     'campaign', 'audience', 'customer', 'product', 'brand', 'connector',
-    'secretRef', 'policy', 'user', 'waitlistEntry', 'organization', 'tenant',
+    'secretRef', 'policy', 'user', 'waitlistEntry', 'organization',
+    'outreach', 'prospect', 'contentAsset', 'growthExperiment',
+    'capitalLedgerEntry', 'tenant',
   ]
   for (const name of tables) {
     // @ts-expect-error dynamic model
@@ -56,6 +58,18 @@ async function main() {
       autonomyLevel: 1,
       isolationMode: 'pooled',
       learningOptIn: false,
+    },
+  })
+  const mardi = await db.tenant.create({
+    data: {
+      slug: 'mardi_internal',
+      name: 'MARDI Internal',
+      plan: 'enterprise',
+      region: 'us-east-1',
+      autonomyLevel: 3, // can execute low-risk + zero-cost actions
+      isolationMode: 'pooled',
+      learningOptIn: true,
+      executionMode: 'LIVE', // LIVE for zero-cost actions; paid blocked by capital provenance
     },
   })
 
@@ -117,16 +131,83 @@ async function main() {
       isActive: true,
     },
   })
+  await db.user.create({
+    data: {
+      email: 'demo.mardi@mdip.demo',
+      name: 'Demo — MARDI Growth Operator',
+      password: demoHash,
+      roles: 'cmo,marketer,admin',
+      tenantId: mardi.id,
+      isDemo: true,
+      isActive: true,
+    },
+  })
 
   for (const tenant of [acme, nova]) {
     await seedTenant(tenant)
   }
 
+  // --- MARDI_INTERNAL tenant: $0 verified capital, synthetic test capital ---
+  // The internal tenant is the platform's own acquisition vehicle. It starts
+  // with $0 verified earned capital. A synthetic $5000 is recorded as
+  // SYNTHETIC/UNVERIFIED so the platform can demonstrate the zero-capital
+  // engine without fooling itself into thinking it has real money.
+  await db.capitalLedgerEntry.create({
+    data: {
+      tenantId: mardi.id,
+      type: 'AVAILABLE',
+      amount: 5000,
+      source: 'test_seed',
+      provenance: 'SYNTHETIC',
+      verificationStatus: 'UNVERIFIED',
+      description: 'Synthetic test capital — does NOT count toward verified available capital',
+    },
+  })
+
+  // Seed a growth experiment for MARDI_INTERNAL
+  const growthExp = await db.growthExperiment.create({
+    data: {
+      tenantId: mardi.id,
+      name: 'Founder-led outreach to DTC marketing leaders',
+      hypothesis: 'Personalized, evidence-backed outreach to DTC marketing leaders will generate a higher qualified-response rate than generic founder outreach.',
+      icp: JSON.stringify({ title: 'CMO / Head of Growth', company_type: 'DTC e-commerce', revenue: '$1M-$20M' }),
+      problem: 'Marketing leaders cannot distinguish causal from correlational evidence in their dashboards, leading to capital misallocation.',
+      acquisitionMechanism: 'founder_outreach',
+      distributionChannel: 'email',
+      cost: 0,
+      effortHours: 2,
+      status: 'running',
+      startDate: new Date(),
+    },
+  })
+
+  // Seed a prospect for MARDI_INTERNAL (publicly available info only)
+  await db.prospect.create({
+    data: {
+      tenantId: mardi.id,
+      company: 'Example DTC Brand',
+      website: 'https://example-dtc-brand.com',
+      industry: 'consumer goods',
+      size: 'small',
+      region: 'US',
+      contactName: 'Jordan Lee',
+      contactTitle: 'Head of Growth',
+      icpFitScore: 0.85,
+      qualificationSignals: JSON.stringify(['DTC e-commerce', 'spends on Google Ads + Meta', 'has a CMO or Head of Growth']),
+      opportunitySignals: JSON.stringify(['likely lacks causal measurement', 'high ad spend relative to revenue']),
+      status: 'identified',
+      outreachState: 'none',
+      source: 'manual',
+      growthExperimentId: growthExp.id,
+    },
+  })
+
   console.log('Seed complete.')
-  console.log('  tenants:', acme.slug, nova.slug)
+  console.log('  tenants:', acme.slug, nova.slug, mardi.slug)
   console.log('  admin:   ekontetevi@gmail / Payswap123456')
-  console.log('  demo:    demo.acme@mdip.demo / demo.cmo@mdip.demo / demo.nova@mdip.demo / demo.admin@mdip.demo')
+  console.log('  demo:    demo.acme@mdip.demo / demo.cmo@mdip.demo / demo.nova@mdip.demo / demo.admin@mdip.demo / demo.mardi@mdip.demo')
   console.log('  demo password: Demo1234!')
+  console.log('  MARDI_INTERNAL: $0 verified capital, $5000 synthetic (cannot authorize spend)')
 }
 
 async function seedTenant(tenant: { id: string; slug: string; name: string }) {

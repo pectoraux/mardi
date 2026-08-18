@@ -56,6 +56,10 @@ model Tenant {
   policies      Policy[]
   approvals     Approval[]
   capitalLedgerEntries CapitalLedgerEntry[]
+  growthExperiments GrowthExperiment[]
+  prospects     Prospect[]
+  outreaches    Outreach[]
+  contentAssets ContentAsset[]
 }
 
 // -----------------------------------------------------------------------------
@@ -68,21 +72,183 @@ model Tenant {
 // reinvestment pool.
 
 model CapitalLedgerEntry {
-  id            String   @id @default(cuid())
-  tenantId      String
-  type          String   // AVAILABLE | COMMITTED | SPENT | EXPECTED_RETURN | REALIZED_RETURN | REINVESTMENT
-  amount        Float
-  currency      String   @default("USD")
-  source        String   // bootstrap | revenue | experiment | grant | ...
-  referenceType String?  // Campaign | Experiment | Decision | ...
-  referenceId   String?
-  description   String?
-  createdAt     DateTime @default(now())
-  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id                 String   @id @default(cuid())
+  tenantId           String
+  type               String   // AVAILABLE | COMMITTED | SPENT | EXPECTED_RETURN | REALIZED_RETURN | REINVESTMENT
+  amount             Float
+  currency           String   @default("USD")
+  source             String   // bootstrap | revenue | experiment | grant | ...
+  // CAPITAL PROVENANCE (milestone 1) — capital has explicit origin so the
+  // platform can never fool itself into thinking synthetic/test capital is
+  // earned revenue.
+  provenance         String   @default("SYNTHETIC") // SYNTHETIC | OWNER_FUNDED | EARNED_REVENUE | REINVESTED_PROFIT
+  verificationStatus String   @default("UNVERIFIED") // UNVERIFIED | VERIFIED | DISPUTED
+  verifiedAt         DateTime?
+  verifiedBy         String?
+  referenceType      String?  // Campaign | Experiment | Decision | GrowthExperiment | ...
+  referenceId        String?
+  description        String?
+  createdAt          DateTime @default(now())
+  tenant             Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([tenantId, type])
+  @@index([tenantId, provenance])
   @@index([referenceType, referenceId])
+}
+
+// -----------------------------------------------------------------------------
+// 0c. GROWTH EXPERIMENT — first-class acquisition experiment (milestone 2)
+// -----------------------------------------------------------------------------
+// Distinct from marketing Experiment (which tests creative A vs B). A Growth
+// Experiment tests "will this acquisition mechanism produce qualified
+// customers?" It tracks the full funnel: exposure → visitors → leads →
+// qualified leads → signups → activated → customers → revenue.
+
+model GrowthExperiment {
+  id                  String   @id @default(cuid())
+  tenantId            String
+  name                String
+  hypothesis          String
+  icp                 String?  // Ideal Customer Profile description (JSON)
+  problem             String?  // The problem this experiments tests solving
+  acquisitionMechanism String  // founder_outreach | teardown | free_tool | content | seo | referral | ...
+  distributionChannel String?  // email | linkedin | twitter | organic_search | direct | ...
+  intervention        String?  // What we did
+  expectedOutcome     String?  // JSON
+  cost                Float    @default(0) // cash cost (always $0 in this milestone)
+  effortHours         Float    @default(0) // non-cash cost tracking
+  status              String   @default("draft") // draft | running | completed | analyzed
+  // Funnel metrics
+  exposure            Int      @default(0)
+  visitors            Int      @default(0)
+  leads               Int      @default(0)
+  qualifiedLeads      Int      @default(0)
+  signups             Int      @default(0)
+  activatedUsers      Int      @default(0)
+  customers           Int      @default(0)
+  revenue             Float    @default(0)
+  contributionMargin  Float    @default(0)
+  timeToConversionDays Float?
+  evidence            String?  // JSON []
+  decision            String?  // ship | iterate | kill
+  learning            String?
+  startDate           DateTime?
+  endDate             DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  tenant              Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  prospects           Prospect[]
+  outreaches          Outreach[]
+  contentAssets       ContentAsset[]
+
+  @@index([tenantId])
+  @@index([tenantId, acquisitionMechanism])
+  @@index([tenantId, status])
+}
+
+// -----------------------------------------------------------------------------
+// 0d. PROSPECT / ACCOUNT INTELLIGENCE (milestone 5)
+// -----------------------------------------------------------------------------
+
+model Prospect {
+  id              String   @id @default(cuid())
+  tenantId        String
+  // Account info (publicly available only)
+  company         String
+  website         String?
+  industry        String?
+  size            String?  // startup | small | mid | enterprise
+  region          String?
+  // Contact (human-approved outreach only)
+  contactName     String?
+  contactEmail    String?
+  contactTitle    String?
+  linkedinUrl     String?
+  // ICP fit + qualification
+  icpFitScore     Float    @default(0) // 0..1
+  qualificationSignals String? // JSON []
+  opportunitySignals   String? // JSON []
+  // Outreach state
+  status          String   @default("identified") // identified | researching | diagnosed | contacted | responded | qualified | converted | rejected
+  outreachState   String   @default("none") // none | drafting | pending_approval | approved | sent | replied | conversation | closed
+  lastContactedAt DateTime?
+  // Source + evidence
+  source          String   @default("manual") // manual | diagnostic_tool | referral | ...
+  evidence        String?  // JSON []
+  notes           String?
+  growthExperimentId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  growthExperiment GrowthExperiment? @relation(fields: [growthExperimentId], references: [id], onDelete: SetNull)
+  outreaches      Outreach[]
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, outreachState])
+}
+
+// -----------------------------------------------------------------------------
+// 0e. OUTREACH — founder-led outreach with human approval (milestone 9)
+// -----------------------------------------------------------------------------
+
+model Outreach {
+  id              String   @id @default(cuid())
+  tenantId        String
+  prospectId      String
+  growthExperimentId String?
+  type            String   // email | linkedin | twitter | ...
+  subject         String?
+  body            String
+  diagnosis       String?  // The evidence-backed diagnosis that informs this outreach
+  rationale       String?  // Why this prospect was selected
+  status          String   @default("draft") // draft | pending_approval | approved | sent | replied | bounced | closed
+  approvedBy      String?
+  approvedAt      DateTime?
+  sentAt          DateTime?
+  repliedAt       DateTime?
+  responseSummary String?
+  outcome         String?  // conversation | qualified | converted | rejected | no_response
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  prospect        Prospect @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+  growthExperiment GrowthExperiment? @relation(fields: [growthExperimentId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([prospectId])
+}
+
+// -----------------------------------------------------------------------------
+// 0f. CONTENT ASSET — evidence-based content tied to acquisition hypothesis
+// -----------------------------------------------------------------------------
+
+model ContentAsset {
+  id              String   @id @default(cuid())
+  tenantId        String
+  growthExperimentId String?
+  type            String   // teardown | benchmark | case_study | research_report | diagnostic | blog | ...
+  title           String
+  targetICP       String?
+  hypothesis      String?
+  distributionPlan String? // JSON
+  status          String   @default("draft") // draft | published | measured
+  url             String?
+  body            String?
+  exposure        Int      @default(0)
+  visitors        Int      @default(0)
+  leads           Int      @default(0)
+  measuredOutcome String?  // JSON
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  growthExperiment GrowthExperiment? @relation(fields: [growthExperimentId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, type])
+  @@index([tenantId, status])
 }
 
 model Organization {

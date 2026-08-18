@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Activity, Brain, FlaskConical, GitFork, LayoutDashboard,
-  Lightbulb, Network, Plug, ScrollText, Shield, Sparkles, Users,
+  Lightbulb, Network, Plug, ScrollText, Shield, Sparkles, TrendingUp, Users,
 } from 'lucide-react'
 import { apiFetch, type AutonomyT, type DashboardData, type Tenant } from '@/components/dashboard/types'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
@@ -21,6 +21,9 @@ import { DecisionsTab } from '@/components/dashboard/decisions-tab'
 import { AgentTab } from '@/components/dashboard/agent-tab'
 import { AuthModal } from '@/components/dashboard/auth-modal'
 import { AdminTab } from '@/components/dashboard/admin-tab'
+import { GrowthTab } from '@/components/dashboard/growth/growth-tab'
+import { DiagnosticTool } from '@/components/dashboard/growth/diagnostic-tool'
+import { useSearchParams } from 'next/navigation'
 
 const TABS = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -30,6 +33,7 @@ const TABS = [
   { id: 'recommendations', label: 'Recommendations', icon: Lightbulb },
   { id: 'decisions', label: 'Decision Ledger', icon: ScrollText },
   { id: 'agent', label: 'Strategy Agent', icon: Brain },
+  { id: 'growth', label: 'Growth', icon: TrendingUp },
 ] as const
 
 interface SessionUser {
@@ -44,6 +48,17 @@ interface SessionUser {
 }
 
 export default function Page() {
+  const searchParams = useSearchParams()
+  const isDiagnosticTool = searchParams.get('tool') === 'growth-diagnostic'
+
+  // Public diagnostic tool — no auth required, renders standalone
+  if (isDiagnosticTool) {
+    return <DiagnosticTool />
+  }
+  return <Dashboard />
+}
+
+function Dashboard() {
   const [tenant, setTenant] = useState('acme')
   const [tab, setTab] = useState<string>('overview')
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(null)
@@ -204,6 +219,9 @@ export default function Page() {
             </TabsContent>
             <TabsContent value="agent" className="mt-0">
               <AgentTab tenant={tenant} />
+            </TabsContent>
+            <TabsContent value="growth" className="mt-0">
+              <GrowthTab tenant={tenant} />
             </TabsContent>
             {sessionUser?.isAdmin && (
               <TabsContent value="admin" className="mt-0">
